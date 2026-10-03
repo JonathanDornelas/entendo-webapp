@@ -1,0 +1,562 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Auth (Better Auth, adapter Prisma) — ver .claude/rules/auth.md
+// `Teacher` é o modelo de usuário do Better Auth (renomeado via `user.modelName`
+// em $lib/server/auth). Os campos de billing vivem aqui porque são o estado de
+// acesso do professor — ver .claude/rules/billing.md "Entitlements".
+// ---------------------------------------------------------------------------
+
+model Teacher {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  /// O avatar, como DEZOITO NÚMEROS separados por hífen — nunca uma imagem
+  /// (ver `$lib/avatar/montar.ts`). Cabe numa coluna de texto, viaja no `load`
+  /// sem custo e não precisa de bucket nem de regra de ciclo de vida. Nulo é o
+  /// normal: quem nunca abriu o editor aparece pelas iniciais.
+  ///
+  /// Separado de `image`, que é do Better Auth e guarda URL: os dois significam
+  /// coisas diferentes, e reaproveitar aquele campo faria o adapter tentar
+  /// carregar "1-2-1-..." como endereço.
+  avatar String?
+
+  plan               String?
+  subscriptionStatus String?
+  currentPeriodEnd   DateTime?
+  gracePeriodEnd     DateTime?
+  stripeCustomerId   String?   @unique
+
+  sessions     Session[]
+  accounts     Account[]
+  activities   Activity[]
+  contentUnits ContentUnit[]
+  mediaAssets  MediaAsset[]
+  classrooms   Classroom[]
+  students     Student[]
+}
+
+model Session {
+  id        String   @id
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId  String
+  teacher Teacher @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  providerId            String
+  issuer                String
+  accountId             String
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  userId  String
+  teacher Teacher @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+// ---------------------------------------------------------------------------
+// Conta do ALUNO — opcional, e separada da do professor de propósito.
+//
+// O produto continua funcionando sem conta nenhuma: o aluno abre o link,
+// digita o nome e responde. A conta existe só para ele guardar o histórico
+// dele e reencontrá-lo em outro aparelho — nunca para destravar a atividade.
+//
+// Tabelas próprias, e não um campo `role` na `Teacher`: professor tem
+// assinatura, atividades e turmas penduradas nele, e uma sessão de aluno
+// jamais pode virar sessão de professor por um bug de escopo. São duas
+// instâncias de Better Auth, cada uma com o seu conjunto de tabelas — o hash
+// de senha e a sessão continuam sendo da biblioteca (auth.md).
+// ---------------------------------------------------------------------------
+
+model StudentAccount {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  /// O avatar do aluno — mesma forma e mesmo porquê do `Teacher.avatar`. Aqui
+  /// ele tem um uso a mais: é o que a turma vê ao lado do nome dele, e é a
+  /// única coisa da conta do aluno que ele escolhe por gosto.
+  avatar String?
+
+  sessions    StudentSession[]
+  credentials StudentCredential[]
+
+  /// As fichas de chamada ligadas a esta pessoa. Uma por turma: o mesmo aluno
+  /// em dois cursos do mesmo professor são dois cadastros, e continuam sendo.
+  roster   Student[]
+  attempts Attempt[]
+}
+
+model StudentSession {
+  id        String   @id
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId  String
+  account StudentAccount @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model StudentCredential {
+  id                    String    @id
+  providerId            String
+  issuer                String
+  accountId             String
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  userId  String
+  account StudentAccount @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model StudentVerification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+// ---------------------------------------------------------------------------
+// Conteúdo e atividades — ver .claude/rules/kernel.md e .claude/rules/db.md
+// ---------------------------------------------------------------------------
+
+model ContentUnit {
+  id   String @id @default(cuid())
+  kind String // SentencePair | VocabItem | Passage | Dialogue
+  data Json // formato depende de `kind` — valide com Zod ao ler, nunca confie no tipo do Prisma
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  /// Em quais atividades este material está sendo usado. É N:N porque o
+  /// material entra na BIBLIOTECA do professor e pode ser reusado em outra
+  /// atividade (paginas.md "Materiais"); sem isto, "materiais desta
+  /// atividade" mostraria a biblioteca inteira.
+  activities Activity[] @relation("AtividadeMaterial")
+
+  @@index([teacherId])
+}
+
+model MediaAsset {
+  id       String @id @default(cuid())
+  hash     String
+  url      String
+  kind     String // audio | image
+  duration Int? // segundos, só para áudio
+
+  createdAt DateTime @default(now())
+
+  /// Quando o objeto some do bucket. O MinIO apaga por regra de ciclo de vida
+  /// (10 dias); esta coluna é a MESMA data do lado de cá, porque o bucket
+  /// apagar o arquivo não apaga a linha — e uma linha apontando para um objeto
+  /// que já foi embora faz o Player servir uma URL morta.
+  expiresAt DateTime
+
+  /// **O áudio não tem dono além do PROFESSOR.**
+  ///
+  /// O dono já foi o hash global, depois a atividade, depois o material. O
+  /// material parecia certo — é de onde o texto sai — mas ele é só um
+  /// FACILITADOR de montagem: apagar um da biblioteca derrubava o áudio de uma
+  /// atividade no ar, e nem uma referência solta conserta o mal-entendido de
+  /// fundo, que é a atividade depender de algo que o professor pode jogar fora.
+  ///
+  /// Agora a identidade é só o conteúdo: `hash(texto, voz, velocidade)`, único
+  /// por professor. A mesma frase em dois materiais é UM arquivo; apagar
+  /// material não alcança nada; e regerar funciona sempre, porque o texto está
+  /// congelado no item.
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  /// O hash é único por PROFESSOR: é ele que torna a geração idempotente
+  /// (rodar o job duas vezes reescreve o mesmo objeto) e o reuso automático
+  /// (a mesma frase noutra atividade não paga síntese de novo).
+  @@unique([teacherId, hash])
+  @@index([expiresAt])
+}
+
+model Activity {
+  id    String @id @default(cuid())
+  title String
+
+  /// Tags de LanguageProfile (kernel/language/profiles). O par é escolhido na
+  /// etapa 1 do wizard e define tokenização, direção do texto e normalização —
+  /// por isso mora na atividade, não em cada item.
+  sourceLang String @default("pt-BR")
+  targetLang String @default("en-US")
+
+  /// Quantas questões gerar, escolhido na etapa 1. Teto de 15 por atividade:
+  /// acima disso o aluno abandona no meio e o relatório do professor fica pela
+  /// metade. Não é o número de itens FINAL — o professor ainda descarta na
+  /// revisão —, é o alvo que os geradores tentam alcançar.
+  itemTarget Int @default(12)
+
+  /// Quais habilidades o professor quer nesta atividade. Ele não marca a
+  /// habilidade de cada item (ela é DERIVADA — kernel.md), mas escolhe o que a
+  /// atividade treina, e o gerador filtra o que produziu. Vazio = todas as
+  /// disponíveis.
+  skills String[] @default(["listening", "speaking", "reading", "writing"])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  versions ActivityVersion[]
+
+  /// O material colado durante a criação fica ligado à atividade, mas segue
+  /// na biblioteca do professor — ver ContentUnit.activities.
+  contentUnits ContentUnit[] @relation("AtividadeMaterial")
+
+  @@index([teacherId])
+}
+
+/// Imutável após criada — regra inviolável nº 7. Editar cria uma versão nova.
+model ActivityVersion {
+  id            String   @id @default(cuid())
+  versionNumber Int
+  createdAt     DateTime @default(now())
+
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
+  items        Item[]
+  publications Publication[]
+
+  @@unique([activityId, versionNumber])
+}
+
+model Item {
+  id              String  @id @default(cuid())
+  sourceContentId String? // ContentUnit.id de origem — referência solta, null se autoria manual
+  generatedBy     String? // id do gerador que produziu o item — null se autoria manual
+  order           Int
+
+  /// Descartado na etapa de revisão. O item CONTINUA no rascunho para poder
+  /// ser restaurado; só não entra na versão publicada. Apagar de vez tornaria
+  /// o "Restaurar" da tela impossível.
+  discarded Boolean @default(false)
+
+  // JSON — valide com Zod ao ler, nunca confie no tipo do Prisma. Forma em kernel.md "Forma do Item".
+  prompt      Json
+  interaction Json
+  grading     Json
+  locale      Json
+
+  activityVersionId String
+  activityVersion   ActivityVersion @relation(fields: [activityVersionId], references: [id], onDelete: Cascade)
+
+  attemptItems AttemptItem[]
+
+  @@index([activityVersionId])
+}
+
+model Publication {
+  id       String @id @default(cuid())
+  slug     String @unique
+  settings Json // feedback ao aluno, código de acesso, etc. — validado com Zod ao ler
+
+  createdAt DateTime @default(now())
+
+  activityVersionId String
+  activityVersion   ActivityVersion @relation(fields: [activityVersionId], references: [id])
+
+  attempts   Attempt[]
+  deliveries Delivery[]
+
+  @@index([activityVersionId])
+}
+
+// ---------------------------------------------------------------------------
+// Player — aluno anônimo, sem sessão de professor. Ver server.md "fronteira de
+// segurança do Player". Repositórios próprios, sem escopo de teacherId.
+// ---------------------------------------------------------------------------
+
+model Attempt {
+  id     String @id @default(cuid())
+  name   String
+  anonId String
+  seed   String // aleatorização determinística a partir daqui — regra inviolável nº 8
+
+  /// Quem respondeu, QUANDO se sabe. Nulo é o caminho normal: o aluno entrou
+  /// pelo link aberto, digitou um nome e respondeu — e a tentativa vale igual
+  /// no relatório do professor. Preenchido quando ele chegou por um link
+  /// pessoal, ou quando se identificou depois e vinculou o que já tinha feito.
+  studentId String?
+  student   Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  /// A conta do aluno, quando ele respondeu LOGADO. É o que faz o histórico
+  /// dele sobreviver à troca de aparelho — o cookie `anonId` não sobrevive.
+  /// Independente de `studentId`: dá para estar logado sem estar na chamada de
+  /// ninguém (o link aberto continua aberto), e dá para estar na chamada sem
+  /// ter conta.
+  accountId String?
+  account   StudentAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  /// O aluno autorizou GUARDAR as gravações de fala dele para o professor
+  /// ouvir. Opt-in explícito, perguntado na entrada, antes da primeira
+  /// questão — e falso é o padrão: sem o "sim" a gravação é transcrita e
+  /// descartada, como sempre foi.
+  ///
+  /// Fica na TENTATIVA e não no aluno porque é isso que a pergunta significa:
+  /// ele autorizou esta atividade, neste dia. Refazer pergunta de novo.
+  audioConsent Boolean @default(false)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  publicationId String
+  publication   Publication @relation(fields: [publicationId], references: [id])
+
+  items AttemptItem[]
+
+  @@index([publicationId])
+  @@index([studentId])
+  @@index([accountId])
+}
+
+model AttemptItem {
+  id     String @id @default(cuid())
+  answer Json
+  score  Float
+  ms     Int
+
+  createdAt DateTime @default(now())
+
+  attemptId String
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id])
+
+  /// O retorno do PROFESSOR sobre esta resposta. Não existe mais uma fila de
+  /// correção à parte: comentar e corrigir acontecem na tela de resultados, em
+  /// cima da resposta (paginas.md "Resultados"). Vale para qualquer resposta,
+  /// não só `rubric` — o professor comenta o que quiser.
+  comment String? @db.Text
+
+  /// A nota que o professor deu, quando ele deu. Nula é o normal: vale o
+  /// `score` automático. Guardar SEPARADO em vez de sobrescrever `score`
+  /// mantém as duas verdades — o que a máquina achou e o que o professor
+  /// decidiu — e é isso que deixa desfazer a correção sem recorrigir.
+  reviewedScore Float?
+  reviewedAt    DateTime?
+
+  /// A gravação do aluno, quando ele autorizou guardar (`Attempt.audioConsent`).
+  /// É a CHAVE no bucket, não uma URL: o objeto fica privado, e quem serve é
+  /// uma rota do Studio que confere se o professor é dono da tentativa. Uma URL
+  /// pública aqui seria a voz de um aluno acessível a quem tivesse o endereço.
+  audioKey String?
+  /// Quando o bucket apaga a gravação. **7 dias**, contra os 10 do áudio de
+  /// atividade: aquele é conteúdo do professor e se regenera sozinho, este é a
+  /// voz de uma pessoa e não se recria — então vive o mínimo que ainda serve
+  /// para o professor dar retorno.
+  audioExpiresAt DateTime?
+
+  /// Uma resposta por item POR TENTATIVA. Sem isto, voltar para uma questão e
+  /// responder de novo criava uma segunda linha e o item contava duas vezes no
+  /// relatório do professor — e um clique duplo fazia o mesmo.
+  @@unique([attemptId, itemId])
+  @@index([attemptId])
+  @@index([itemId])
+}
+
+// ---------------------------------------------------------------------------
+// Fila e cobrança — ver .claude/rules/server.md e .claude/rules/billing.md
+// ---------------------------------------------------------------------------
+
+/// Poll do worker via `SELECT ... FOR UPDATE SKIP LOCKED` — ver server.md "Fila".
+model Job {
+  id      String @id @default(cuid())
+  type    String
+  payload Json
+  status  String @default("pending") // pending | processing | done | failed
+
+  attempts    Int       @default(0)
+  lockedUntil DateTime?
+  runAfter    DateTime  @default(now())
+  lastError   String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, runAfter])
+}
+
+/// Idempotência do webhook do Stripe — ver billing.md "As três disciplinas". `id` é o `event.id` do Stripe.
+model StripeEvent {
+  id        String   @id
+  type      String
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Turmas e alunos — ver TURMAS-E-ALUNOS.md e .claude/rules/paginas.md.
+//
+// A regra que rege tudo aqui: **convite e link aberto coexistem**. Cadastrar a
+// turma serve para o aluno chegar com o nome certo no relatório e para o
+// professor não redistribuir link toda semana — nunca para trancar quem não
+// está cadastrado.
+// ---------------------------------------------------------------------------
+
+model Classroom {
+  id          String  @id @default(cuid())
+  name        String
+  /// Tag de LanguageProfile. Só filtra atividades; não muda conteúdo nenhum.
+  languageTag String?
+  /// Etiqueta de cor da turma. Violeta/teal/azul/magenta/ardósia — nunca verde
+  /// nem âmbar, que são a semântica de correção (design-system.md).
+  color       String  @default("violeta")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  students   Student[]
+  deliveries Delivery[]
+
+  @@index([teacherId])
+}
+
+/// Um aluno DENTRO de uma turma. `email` é opcional de propósito: aluno sem
+/// e-mail existe na chamada e nos resultados, só não recebe convite. O mesmo
+/// e-mail pode estar em duas turmas — são cadastros, não contas.
+model Student {
+  id    String  @id @default(cuid())
+  name  String
+  email String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+
+  /// A conta do aluno, quando ele tem uma. Opcional e assim continua: a
+  /// chamada é do professor e existe sem conta nenhuma. O vínculo é feito
+  /// abrindo o LINK PESSOAL logado — o token é a prova de que a pessoa
+  /// controla aquele e-mail, que é o que a gente não teria só casando
+  /// endereços digitados.
+  accountId String?
+  account   StudentAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  invites  Invite[]
+  attempts Attempt[]
+
+  @@index([teacherId])
+  @@index([classroomId])
+  @@index([accountId])
+}
+
+/// O ato de mandar uma publicação para uma turma. Guardado porque o histórico
+/// da turma é "o que foi enviado, quando, e quantos abriram".
+model Delivery {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  publicationId String
+  publication   Publication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+
+  invites Invite[]
+
+  @@index([classroomId])
+  @@index([publicationId])
+}
+
+/// O link pessoal de um aluno para uma publicação. `token` é a identidade do
+/// aluno no Player: não existe senha, e o e-mail é o canal, não a credencial.
+model Invite {
+  id    String @id @default(cuid())
+  token String @unique
+
+  sentAt    DateTime?
+  openedAt  DateTime?
+  /// Entrega recusada pelo servidor do aluno — o único estado que pede ação.
+  bouncedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([deliveryId, studentId])
+  @@index([studentId])
+}

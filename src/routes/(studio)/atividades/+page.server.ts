@@ -1,0 +1,132 @@
+import type { PageServerLoad } from './$types';
+import { requireTeacher } from '$lib/server/auth/guard';
+import { atividades } from '$lib/server/db/repos/activities';
+import { prisma } from '$lib/server/db/client';
+import { itemSkills } from '$lib/server/player/runtime';
+import { labelForTag } from '$lib/kernel/language/profiles';
+
+/**
+ * Lista de atividades. As habilidades NÃO são um campo do banco: são
+ * derivadas dos itens da versão (kernel.md "Habilidade é derivada"), então
+ * saem calculadas aqui.
+ *
+ * A tela mostra, além da lista: o rascunho em que o professor parou (a
+ * retomada vem ANTES da lista, porque é a tarefa começada), a distribuição
+ * certo/parcial/errado por atividade e os números do mês.
+ */
+
+function haQuantoTempo(data: Date): string {
+	const min = Math.round((Date.now() - data.getTime()) / 60000);
+	if (min < 60) return 'há minutos';
+	const horas = Math.round(min / 60);
+	if (horas < 24) return `há ${horas}h`;
+	const dias = Math.round(horas / 24);
+	return dias === 1 ? 'ontem' : `há ${dias} dias`;
+}
+
+export const load: PageServerLoad = async ({ locals }) => {
+	const teacher = requireTeacher(locals);
+	const rows = await atividades(teacher).list();
+
+	// Distribuição de acerto por atividade, numa consulta só.
+	const respostas = await prisma.attemptItem.findMany({
+		where: { item: { activityVersion: { activity: { teacherId: teacher.id } } } },
+		select: { score: true, item: { select: { activityVersion: { select: { activityId: true } } } } }
+	});
+
+	const placar = new Map<string, { correct: number; partial: number; incorrect: number }>();
+	for (const r of respostas) {
+		const id = r.item.activityVersion.activityId;
+		const atual = placar.get(id) ?? { correct: 0, partial: 0, incorrect: 0 };
+		if (r.score >= 1) atual.correct++;
+		else if (r.score > 0) atual.partial++;
+		else atual.incorrect++;
+		placar.set(id, atual);
+	}
+
+	const activities = rows.map((activity) => {
+		const publishedVersion = activity.versions.find((v) => v.publications.length > 0);
+		const current = publishedVersion ?? activity.versions[0];
+
+		const skills = new Set<string>();
+		for (const item of current?.items ?? []) {
+			for (const skill of itemSkills(item)) skills.add(skill);
+		}
+
+		const attempts = publishedVersion?.publications.reduce(
+			(total, publication) => total + publication._count.attempts,
+			0
+		);
+
+		return {
+			id: activity.id,
+			title: activity.title,
+			itemCount: current?.items.length ?? 0,
+			skills: [...skills],
+			language: labelForTag(activity.targetLang),
+			// O snapshot de versão é interno (regra nº 7); para o professor a
+			// atividade é uma só, e o que importa aqui é se ela está no ar.
+			noAr: !!publishedVersion,
+			attempts: publishedVersion ? (attempts ?? 0) : null,
+			// Turma cadastrada ainda não existe no produto — sem total previsto,
+			// a tela mostra só o número de tentativas.
+			invited: null,
+			score: placar.get(activity.id) ?? { correct: 0, partial: 0, incorrect: 0 }
+		};
+	});
+
+	// A retomada: o rascunho mexido por último, com a etapa em que parou.
+	const rascunho = rows.find((a) => a.versions.every((v) => v.publications.length === 0));
+	const materiaisDoRascunho = rascunho
+		? await prisma.contentUnit.count({ where: { teacherId: teacher.id } })
+		: 0;
+	const itensDoRascunho = rascunho?.versions[0]?.items.length ?? 0;
+
+	const resume = rascunho
+		? {
+				id: rascunho.id,
+				title: rascunho.title,
+				materiais: materiaisDoRascunho,
+				itens: itensDoRascunho,
+				editadoEm: haQuantoTempo(rascunho.updatedAt),
+				etapa: itensDoRascunho > 0 ? 3 : materiaisDoRascunho > 0 ? 2 : 1,
+				etapaLabel:
+					itensDoRascunho > 0 ? 'Revisar' : materiaisDoRascunho > 0 ? 'Materiais' : 'Detalhes'
+			}
+		: null;
+
+	// Números do mês corrente.
+	const inicioDoMes = new Date();
+	inicioDoMes.setDate(1);
+	inicioDoMes.setHours(0, 0, 0, 0);
+	const tentativasNoMes = await prisma.attempt.count({
+		where: {
+			startedAt: { gte: inicioDoMes },
+			publication: { activityVersion: { activity: { teacherId: teacher.id } } }
+		}
+	});
+	const totalRespostas = respostas.length;
+	const acertoMedio = totalRespostas
+		? Math.round((respostas.filter((r) => r.score >= 1).length / totalRespostas) * 100)
+		: 0;
+
+	const publishedCount = activities.filter((a) => a.noAr).length;
+
+	return {
+		teacher: { firstName: teacher.name.split(/\s+/)[0] ?? teacher.name },
+		// A lista INTEIRA, não as 6 primeiras: os filtros e a paginação da tela
+		// trabalham sobre ela. É dado do próprio professor e cabe numa resposta —
+		// uma ida ao servidor por clique de chip não compraria nada.
+		activities,
+		totalCount: activities.length,
+		publishedCount,
+		draftCount: activities.length - publishedCount,
+		resume,
+		mes: {
+			nome: new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(new Date()),
+			tentativas: tentativasNoMes,
+			acertoMedio,
+			respostas: totalRespostas
+		}
+	};
+};

@@ -1,0 +1,43 @@
+import type { PageServerLoad } from './$types';
+import { requireTeacher } from '$lib/server/auth/guard';
+import { turmas } from '$lib/server/db/repos/classrooms';
+import { labelForTag } from '$lib/kernel/language/profiles';
+import { etiquetaDaTurma } from '$lib/server/turmas/etiqueta';
+
+/** Quanto tempo faz, em português, sem trazer uma biblioteca de datas. */
+function haQuantoTempo(data: Date | null): string {
+	if (!data) return 'nunca';
+	const dias = Math.floor((Date.now() - data.getTime()) / 86_400_000);
+	if (dias <= 0) return 'hoje';
+	if (dias === 1) return 'ontem';
+	if (dias < 7) return `há ${dias} dias`;
+	const semanas = Math.floor(dias / 7);
+	if (semanas === 1) return 'há 1 semana';
+	if (semanas < 5) return `há ${semanas} semanas`;
+	const meses = Math.floor(dias / 30);
+	return meses === 1 ? 'há 1 mês' : `há ${meses} meses`;
+}
+
+export const load: PageServerLoad = async ({ locals }) => {
+	const teacher = requireTeacher(locals);
+	const lista = await turmas(teacher).list();
+
+	return {
+		classrooms: lista.map((turma) => ({
+			id: turma.id,
+			name: turma.name,
+			badge: etiquetaDaTurma(turma.name),
+			color: turma.color,
+			languageLabel: turma.languageTag ? labelForTag(turma.languageTag) : null,
+			students: turma.students,
+			withEmail: turma.withEmail,
+			deliveries: turma.deliveries,
+			lastDelivery: haQuantoTempo(turma.lastDeliveryAt)
+		})),
+		totals: {
+			classrooms: lista.length,
+			students: lista.reduce((n, t) => n + t.students, 0),
+			withEmail: lista.reduce((n, t) => n + t.withEmail, 0)
+		}
+	};
+};

@@ -1,0 +1,101 @@
+# A APLICAÇÃO — e só ela.
+#
+#   docker compose up -d --build
+#
+# Banco, object storage e serviço de áudio ficam de fora, cada um com o próprio
+# compose e o próprio volume, para que o ciclo de vida deles não seja o da
+# aplicação: reconstruir a aplicação não pode encostar em dado do professor nem
+# no áudio que já está publicado.
+#
+#   docker compose -f docker/postgres.yml up -d     # o banco
+#   docker compose -f docker/minio.yml up -d        # o object storage
+#   (cd ../audiotext-service && docker compose up -d)   # Whisper + Kokoro
+#
+# **Os dois serviços aqui são a mesma imagem.** O web responde ao professor e ao
+# aluno; o worker consome a fila (é ele quem sintetiza o áudio na publicação).
+# Sem o worker, publicar trava em "gerando áudio" para sempre.
+#
+# Migrations não sobem sozinhas: continuam sendo aplicadas à mão
+# (`pnpm db:migrate`), como o projeto já faz.
+
+name: entendo
+
+x-app: &app
+  build:
+    context: .
+  image: entendo-service:local
+  restart: unless-stopped
+  # O banco, o MinIO e o serviço de áudio estão em OUTROS composes, ou seja em
+  # outras redes. Falar com eles pela porta que cada um publica no host é o que
+  # mantém os quatro independentes — sem rede compartilhada para criar antes,
+  # sem ordem de subida entre eles. `host-gateway` é o que faz esse nome
+  # existir também fora do Docker Desktop.
+  extra_hosts:
+    - 'host.docker.internal:host-gateway'
+  env_file:
+    - .env
+  environment: &app-env
+    # Estes três SOBRESCREVEM o `.env`, e têm de sobrescrever: lá os endereços
+    # são os de quem roda no host (`pnpm dev`), e `localhost` dentro de um
+    # container é o próprio container.
+    DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://user:password@host.docker.internal:5432/entendo}
+    STORAGE_ENDPOINT: ${STORAGE_ENDPOINT_DOCKER:-http://host.docker.internal:9000}
+    AUDIOTEXT_URL: ${AUDIOTEXT_URL_DOCKER:-http://host.docker.internal:8080}
+    # `STORAGE_PUBLIC_URL` NÃO entra nesta lista: ela é o endereço que vai no
+    # `<audio src>` do aluno, resolvido pelo browser DELE. Trocar por
+    # `host.docker.internal` aqui quebraria o áudio em toda tela de escuta.
+    #
+    # `SMTP_URL` sai do `.env` pelo `env_file` acima, sem sobrescrita: um SMTP
+    # é sempre remoto (o Resend, hoje). Em desenvolvimento o caminho não é um
+    # SMTP nenhum — é apagar `EMAIL_PROVIDER` e ler o convite no log deste
+    # worker.
+
+services:
+  web:
+    <<: *app
+    container_name: entendo-web
+    environment:
+      <<: *app-env
+      # `adapter-node` recusa POST sem `ORIGIN` — as form actions e o login
+      # falhariam com "cross-site form submission forbidden".
+      ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      BETTER_AUTH_URL: ${APP_ORIGIN:-http://localhost:3000}
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    deploy:
+      resources:
+        limits:
+          # 4 vCPU e 16 GB no servidor, divididos entre estes dois, o Postgres,
+          # o MinIO e o serviço de áudio (que é o faminto: 2 CPU e 3 GB). Teto,
+          # não reserva — existe para nenhum processo derrubar os outros.
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      # A imagem é `slim`: não tem curl. O próprio Node responde.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  worker:
+    <<: *app
+    container_name: entendo-worker
+    # O binário direto, e não `pnpm exec`: sem um `packageManager` fixado no
+    # package.json, o corepack sai BAIXANDO o pnpm toda vez que o container
+    # sobe — rede em runtime para chamar um executável que já está na imagem.
+    # E sem `watch`, que é comportamento de `pnpm worker` em desenvolvimento:
+    # aqui o código não muda debaixo do processo.
+    command: ['./node_modules/.bin/tsx', 'worker/index.ts']
+    # Não publica porta: ele não atende ninguém, só consome a fila.
+    deploy:
+      resources:
+        limits:
+          # Ele espera no serviço de áudio a maior parte do tempo; o trabalho
+          # pesado do TTS acontece do outro lado.
+          cpus: '0.5'
+          memory: 768M

@@ -1,0 +1,1548 @@
+<script lang="ts">
+	// O formulário de material — UM só, para a biblioteca e para a etapa 2 do
+	// wizard. Lá ele é coluna fixa; na biblioteca é painel sobre a lista. É o
+	// mesmo bloco, e por isso mora aqui: as duas telas divergiam no primeiro
+	// ajuste de layout enquanto cada uma tinha a sua cópia.
+	//
+	// Quem é dono do `<form>` é a PÁGINA: ela escolhe a remote function (criar,
+	// lote ou editar, conforme `modo` e `editando`) e o que fazer no sucesso.
+	// Este componente só desenha os campos com os `name` que
+	// `camposMaterial` espera, mais tudo que se calcula no cliente: a prévia
+	// do lote, o rendimento do conjunto, o aviso de repetido e "o que o aluno
+	// vai ver".
+	import Loading from './Loading.svelte';
+	import { tokenize } from '$lib/kernel/language/tokenize';
+	import { shuffleWithSeed } from '$lib/kernel/random';
+	import { previewRawLines, RAW_SEPARATORS } from '$lib/kernel/content/parse-raw';
+	import { estimarRendimento, MINIMO_PARA_DISTRATOR } from '$lib/kernel/content/rendimento';
+	import {
+		FALAS_INICIAIS,
+		KIND_TO_KERNEL,
+		TIPOS,
+		type Fala,
+		type MaterialKind,
+		type MaterialRow,
+		type Pergunta
+	} from './material-form';
+
+	export type Modo = 'um' | 'lista' | 'ia';
+	/** O bastante para dizer "você já tem esta frase" — os campos que o servidor compara. */
+	export type MaterialRef = Pick<
+		MaterialRow,
+		'id' | 'kind' | 'target' | 'source' | 'note' | 'example'
+	>;
+	/**
+	 * O que as remote functions devolvem, nas três formas: erro, um material
+	 * (com `reused` dizendo se já existia) e o lote (com as contagens).
+	 */
+	export type ResultadoMaterial =
+		| { ok: false; error: string }
+		| { ok: true; reused?: boolean }
+		| { ok: true; added: number; reused: number; ignored: number };
+
+	let {
+		contexto,
+		conjunto,
+		biblioteca = conjunto,
+		contentTag = 'und',
+		dir = 'ltr',
+		targetLabel,
+		sourceLabel,
+		modo = $bindable('um'),
+		editando = $bindable(null),
+		resultado,
+		salvando = false,
+		onfechar,
+		fecharRotulo,
+		fecharSoNoCelular = false
+	}: {
+		/** Muda o título, o rendimento e o rótulo de salvar — nunca os campos. */
+		contexto: 'biblioteca' | 'wizard';
+		/** O conjunto que o rendimento conta: a biblioteca inteira, ou o da atividade. */
+		conjunto: MaterialRow[];
+		/** Onde procurar repetido — a biblioteca inteira, quando `conjunto` é só uma atividade. */
+		biblioteca?: MaterialRef[];
+		/** Tag do idioma alvo, para tokenizar a prévia. `und` na biblioteca, que não tem idioma. */
+		contentTag?: string;
+		dir?: 'ltr' | 'rtl';
+		/** "Inglês" → "Frase em inglês". Sem ele, "Frase no idioma alvo". */
+		targetLabel?: string;
+		sourceLabel?: string;
+		modo?: Modo;
+		editando?: MaterialRow | null;
+		resultado?: ResultadoMaterial;
+		salvando?: boolean;
+		/** Com ele, o cabeçalho ganha o botão de fechar. */
+		onfechar?: () => void;
+		/** Texto ao lado do X — no wizard do celular é "Ver os N materiais". */
+		fecharRotulo?: string;
+		/** No wizard o formulário é coluna fixa no desktop: o X só faz sentido no celular. */
+		fecharSoNoCelular?: boolean;
+	} = $props();
+
+	const wiz = $derived(contexto === 'wizard');
+	const editing = $derived(editando !== null);
+
+	// ── campos ──────────────────────────────────────────────────────────────
+	let kind = $state<MaterialKind>('pair');
+	let alvo = $state('');
+	let traducao = $state('');
+	let raw = $state('');
+	let nota = $state('');
+	let exemplo = $state('');
+	let perguntas = $state<Pergunta[]>([{ question: '', answer: '' }]);
+	let falas = $state<Fala[]>(FALAS_INICIAIS.map((f) => ({ ...f })));
+	let lote = $state('');
+	let textareaLote = $state<HTMLTextAreaElement | null>(null);
+	let primeiroCampo = $state<HTMLInputElement | null>(null);
+
+	const kernelKind = $derived(KIND_TO_KERNEL[kind]);
+	const podeColar = $derived((kind === 'pair' || kind === 'vocab') && !editing);
+	// Texto e diálogo não têm "um por linha"; editar é sempre um de cada vez.
+	const modoEfetivo = $derived<Modo>(editing ? 'um' : modo === 'lista' && !podeColar ? 'um' : modo);
+
+	export function limpar() {
+		editando = null;
+		alvo = '';
+		traducao = '';
+		raw = '';
+		nota = '';
+		exemplo = '';
+		perguntas = [{ question: '', answer: '' }];
+		falas = FALAS_INICIAIS.map((f) => ({ ...f }));
+		lote = '';
+	}
+
+	export function novo() {
+		limpar();
+		modo = 'um';
+		primeiroCampo?.focus();
+	}
+
+	/** Reabre o formulário com os campos CRUS da linha — nunca com o resumo. */
+	export function editar(m: MaterialRow) {
+		editando = m;
+		kind = m.kind;
+		modo = 'um';
+		alvo = m.target;
+		traducao = m.source;
+		raw = m.raw;
+		nota = m.note;
+		exemplo = m.example;
+		perguntas =
+			m.questions.length > 0 ? m.questions.map((q) => ({ ...q })) : [{ question: '', answer: '' }];
+		falas =
+			m.lines.length > 0 ? m.lines.map((l) => ({ ...l })) : FALAS_INICIAIS.map((f) => ({ ...f }));
+	}
+
+	function escolherTipo(id: MaterialKind) {
+		if (editing) return;
+		kind = id;
+		// `modo` é o que a página lê para escolher a remote function, então ele
+		// precisa dizer a verdade: texto e diálogo não têm lote.
+		if (modo === 'lista' && id !== 'pair' && id !== 'vocab') modo = 'um';
+	}
+
+	// ── perguntas e falas ───────────────────────────────────────────────────
+	function adicionarPergunta() {
+		perguntas = [...perguntas, { question: '', answer: '' }];
+	}
+	function removerPergunta(i: number) {
+		perguntas = perguntas.filter((_, j) => j !== i);
+		if (perguntas.length === 0) perguntas = [{ question: '', answer: '' }];
+	}
+	function adicionarFala() {
+		// Alterna o falante da última: diálogo é conversa, não monólogo.
+		const ultima = falas.at(-1)?.speaker ?? 'B';
+		falas = [...falas, { speaker: ultima === 'A' ? 'B' : 'A', text: '' }];
+	}
+	function removerFala(i: number) {
+		falas = falas.filter((_, j) => j !== i);
+	}
+	function moverFala(i: number, delta: number) {
+		const j = i + delta;
+		if (j < 0 || j >= falas.length) return;
+		const proximas = [...falas];
+		[proximas[i], proximas[j]] = [proximas[j], proximas[i]];
+		falas = proximas;
+	}
+	const proximoFalante = $derived((falas.at(-1)?.speaker ?? 'B') === 'A' ? 'B' : 'A');
+
+	// ── repetido, dito enquanto digita ──────────────────────────────────────
+	// O servidor reaproveita material IGUAL (igualdade de jsonb, `findEquivalent`),
+	// então a comparação aqui espelha essa: os campos como vão ser gravados,
+	// só com as pontas aparadas. Não passa pelo normalizador de propósito —
+	// "café" e "cafe" são DOIS materiais para o servidor, e dizer "você já tem"
+	// para depois gravar outro seria mentir.
+	const repetido = $derived.by(() => {
+		if (editing || modoEfetivo !== 'um' || (kind !== 'pair' && kind !== 'vocab')) return null;
+		const a = alvo.trim();
+		const b = traducao.trim();
+		if (!a || !b) return null;
+		const extra = (kind === 'pair' ? nota : exemplo).trim();
+		const igual = biblioteca.find(
+			(m) =>
+				m.kind === kind &&
+				m.target === a &&
+				m.source === b &&
+				(kind === 'pair' ? m.note : m.example) === extra
+		);
+		if (!igual) return null;
+		return { row: igual, noConjunto: conjunto.some((m) => m.id === igual.id) };
+	});
+
+	// ── rendimento do conjunto ──────────────────────────────────────────────
+	const rendimento = $derived(
+		estimarRendimento(
+			conjunto.map((m) => ({ kind: KIND_TO_KERNEL[m.kind], questions: m.questions.length }))
+		)
+	);
+	const onde = $derived(wiz ? 'nesta atividade' : 'na sua biblioteca');
+	const plural = (n: number, um: string, varios: string) => `${n} ${n === 1 ? um : varios}`;
+	const yieldInfo = $derived.by(() => {
+		const r = rendimento;
+		switch (kind) {
+			case 'pair':
+				return {
+					warn: false,
+					title: `${plural(r.frases, 'frase', 'frases')} ${onde}`,
+					body: 'Cada frase rende 3 exercícios: montar, traduzir e completar a lacuna. Com escuta e fala configuradas, mais ouvir, escrever e dizer.'
+				};
+			case 'vocab': {
+				const falta = wiz && r.termos < MINIMO_PARA_DISTRATOR;
+				return {
+					warn: falta,
+					title: falta
+						? `${r.termos} de ${MINIMO_PARA_DISTRATOR} termos`
+						: `${plural(r.termos, 'termo', 'termos')} ${onde}`,
+					body: falta
+						? 'A alternativa errada sai de OUTRO termo seu. Com um só, nada é gerado — adicione ao menos um segundo termo.'
+						: 'A alternativa errada sai de outro termo do mesmo conjunto, e um item de associação fecha a atividade.'
+				};
+			}
+			case 'text': {
+				const falta = wiz && r.perguntas < MINIMO_PARA_DISTRATOR;
+				return {
+					warn: falta,
+					title: falta
+						? `${r.perguntas} de ${MINIMO_PARA_DISTRATOR} perguntas no conjunto`
+						: `${plural(r.textos, 'texto', 'textos')} ${onde}`,
+					body: falta
+						? 'A alternativa errada de uma pergunta sai da resposta de outra pergunta sua. Com uma só, nada é gerado.'
+						: 'Cada pergunta vira uma questão de escolha. Texto sem pergunta não gera nada.'
+				};
+			}
+			case 'dialogue':
+				return {
+					warn: false,
+					title: `${plural(r.dialogos, 'diálogo', 'diálogos')} ${onde}`,
+					body: 'Cada diálogo vira um exercício de colocar as falas na ordem. Não precisa de par: ele se resolve sozinho.'
+				};
+		}
+	});
+
+	// ── colar uma lista ─────────────────────────────────────────────────────
+	const linhasLote = $derived(modoEfetivo === 'lista' ? previewRawLines(lote) : []);
+	const loteOk = $derived(linhasLote.filter((l) => l.ok).length);
+	const loteRuim = $derived(linhasLote.length - loteOk);
+
+	/** Leva o cursor até a linha sem separador — é onde o conserto acontece. */
+	function corrigirLinha(n: number) {
+		const ta = textareaLote;
+		if (!ta) return;
+		const brutas = lote.split('\n');
+		let inicio = 0;
+		let vistas = 0;
+		for (let i = 0; i < brutas.length; i++) {
+			if (brutas[i].trim()) {
+				vistas++;
+				if (vistas === n) {
+					ta.focus();
+					ta.setSelectionRange(inicio, inicio + brutas[i].length);
+					return;
+				}
+			}
+			inicio += brutas[i].length + 1;
+		}
+	}
+
+	// ── gerar com IA — só o front; o "Gerar" espera o provedor ─────────────
+	type Fonte = 'prompt' | 'imagem' | 'video';
+	let fonte = $state<Fonte>('prompt');
+	let promptIa = $state('');
+	let quantos = $state(10);
+	interface Proposta {
+		esq: string;
+		dir: string;
+		reused: boolean;
+		on: boolean;
+	}
+	// Fica vazio até existir backend; a lista abaixo já sabe desenhar o que
+	// vier — marcar, desmarcar, "você já tem".
+	let propostas = $state<Proposta[]>([]);
+	const nMarcadas = $derived(propostas.filter((p) => p.on).length);
+	const nJaTem = $derived(propostas.filter((p) => p.on && p.reused).length);
+	const FONTES: { id: Fonte; label: string; hint: string; icon: string }[] = [
+		{
+			id: 'prompt',
+			label: 'Prompt',
+			hint: 'você descreve',
+			icon: 'M5 6.5h14M5 11h14M5 15.5h8M5 20h5'
+		},
+		{
+			id: 'imagem',
+			label: 'Imagem',
+			hint: 'foto de página',
+			icon: 'M3 7.5a3 3 0 013-3h12a3 3 0 013 3v9a3 3 0 01-3 3H6a3 3 0 01-3-3zM4 16l4.5-4.5 3.5 3.5 3-3L20 16'
+		},
+		{
+			id: 'video',
+			label: 'Vídeo',
+			hint: 'com fala',
+			icon: 'M3.5 7a2.5 2.5 0 012.5-2.5h6A2.5 2.5 0 0114.5 7v10a2.5 2.5 0 01-2.5 2.5H6A2.5 2.5 0 013.5 17zM14.5 10l6-3.5v11l-6-3.5z'
+		}
+	];
+	const promptPlaceholder = $derived(
+		{
+			pair: 'Frases sobre rotina no presente simples, nível de 7º ano, com horas.',
+			vocab: 'Vocabulário de café da manhã e horários do dia.',
+			text: 'Um texto curto sobre a rotina de manhã de uma pessoa, com 4 perguntas.',
+			dialogue: 'Um diálogo de duas pessoas numa padaria, 6 falas.'
+		}[kind]
+	);
+	const atalhos = $derived(
+		{
+			pair: ['do meu último texto', 'mais fáceis', 'com negativa'],
+			vocab: ['do meu último texto', '+ frase de exemplo', 'só substantivos'],
+			text: ['mais curto', 'nível iniciante', '+ perguntas'],
+			dialogue: ['mais falas', 'linguagem informal', 'em loja']
+		}[kind]
+	);
+	function usarAtalho(a: string) {
+		promptIa = promptIa.trim() ? `${promptIa.trim()}, ${a}` : a;
+	}
+	function marcarTodas() {
+		const todas = nMarcadas === propostas.length;
+		propostas = propostas.map((p) => ({ ...p, on: !todas }));
+	}
+
+	// ── o que o aluno vai ver ───────────────────────────────────────────────
+	const EXEMPLO = {
+		pair: { alvo: 'She leaves home at eight.', trad: 'Ela sai de casa às oito.' },
+		vocab: { alvo: 'breakfast', trad: 'café da manhã' },
+		text: { pergunta: 'What time does Ana leave home?', resposta: 'At eight.' },
+		dialogue: ['What do you have for breakfast?', 'I have coffee and bread.', 'And you?']
+	};
+	const previa = $derived.by(() => {
+		const outros = conjunto.filter((m) => m.id !== editando?.id);
+		switch (kind) {
+			case 'pair': {
+				const frase = alvo.trim() || EXEMPLO.pair.alvo;
+				// Regra inviolável nº 5: nunca `split(' ')`. O segmentador do idioma
+				// alvo é o que separa palavra em japonês e em tailandês.
+				const tokens = tokenize(frase, { tag: contentTag });
+				return {
+					kind: 'Montar a frase',
+					note: '1 dos 3 exercícios desta frase',
+					prompt: traducao.trim() || EXEMPLO.pair.trad,
+					chips: shuffleWithSeed(tokens, frase),
+					opts: [] as { label: string; right: boolean }[],
+					falas: [] as string[],
+					foot: ''
+				};
+			}
+			case 'vocab': {
+				const certa = traducao.trim() || EXEMPLO.vocab.trad;
+				const erradas = outros
+					.filter((m) => m.kind === 'vocab' && m.source && m.source !== certa)
+					.map((m) => m.source)
+					.slice(0, 2);
+				const opts = shuffleWithSeed(
+					[{ label: certa, right: true }, ...erradas.map((label) => ({ label, right: false }))],
+					certa
+				);
+				return {
+					kind: 'Escolher a tradução',
+					note: 'a errada vem de outro termo seu',
+					prompt: alvo.trim() || EXEMPLO.vocab.alvo,
+					chips: [] as string[],
+					opts,
+					falas: [] as string[],
+					foot:
+						erradas.length === 0
+							? 'As alternativas erradas seriam sentidos de outros termos seus — por isso um termo sozinho não gera nada.'
+							: 'As erradas são sentidos de outros termos da sua lista.'
+				};
+			}
+			case 'text': {
+				const feitas = perguntas.filter((p) => p.question.trim() && p.answer.trim());
+				const primeira = feitas[0] ?? {
+					question: EXEMPLO.text.pergunta,
+					answer: EXEMPLO.text.resposta
+				};
+				const outrasRespostas = [
+					...feitas.slice(1).map((p) => p.answer.trim()),
+					...outros
+						.filter((m) => m.kind === 'text')
+						.flatMap((m) => m.questions.map((q) => q.answer))
+				]
+					.filter((r) => r && r !== primeira.answer)
+					.slice(0, 2);
+				const opts = shuffleWithSeed(
+					[
+						{ label: primeira.answer, right: true },
+						...outrasRespostas.map((label) => ({ label, right: false }))
+					],
+					primeira.question
+				);
+				return {
+					kind: 'Responder sobre o texto',
+					note: 'uma questão por pergunta sua',
+					prompt: primeira.question,
+					chips: [] as string[],
+					opts,
+					falas: [] as string[],
+					foot:
+						outrasRespostas.length === 0
+							? 'A alternativa errada seria a resposta de outra pergunta — com uma só, nada é gerado.'
+							: 'A alternativa errada é a resposta de outra pergunta sua.'
+				};
+			}
+			case 'dialogue': {
+				const ditas = falas.map((f) => f.text.trim()).filter(Boolean);
+				const linhas = ditas.length >= 2 ? ditas : EXEMPLO.dialogue;
+				return {
+					kind: 'Colocar na ordem',
+					note: 'as falas chegam embaralhadas',
+					prompt: 'Arraste as falas para a ordem certa.',
+					chips: [] as string[],
+					opts: [] as { label: string; right: boolean }[],
+					falas: shuffleWithSeed(linhas, linhas.join('\n')),
+					foot: ''
+				};
+			}
+		}
+	});
+
+	// ── salvar ──────────────────────────────────────────────────────────────
+	const podeSalvar = $derived.by(() => {
+		if (salvando) return false;
+		switch (modoEfetivo) {
+			case 'lista':
+				return loteOk > 0;
+			case 'ia':
+				return nMarcadas > 0;
+			default:
+				return kind === 'text'
+					? alvo.trim().length > 0 && raw.trim().length > 0
+					: kind === 'dialogue'
+						? falas.filter((f) => f.text.trim()).length >= 2
+						: alvo.trim().length > 0 && traducao.trim().length > 0;
+		}
+	});
+	const saveLabel = $derived(
+		editing
+			? 'Salvar alterações'
+			: modoEfetivo === 'ia'
+				? `Adicionar ${plural(nMarcadas, 'material', 'materiais')}`
+				: modoEfetivo === 'lista'
+					? `Adicionar ${plural(loteOk, 'material', 'materiais')}`
+					: wiz
+						? 'Adicionar à atividade'
+						: 'Adicionar à biblioteca'
+	);
+	const footNote = $derived(
+		modoEfetivo === 'ia'
+			? nJaTem > 0
+				? `${nJaTem} das marcadas você já tem — essas são reaproveitadas, não duplicadas.`
+				: 'Só o que está marcado é gravado. Nada é salvo enquanto você não confirmar.'
+			: wiz
+				? 'Todo material adicionado aqui também entra na sua biblioteca e pode ser reusado em outra atividade.'
+				: 'Material igual ao que você já tem é reaproveitado, nunca duplicado.'
+	);
+
+	const rotuloAlvo = $derived(
+		kind === 'pair'
+			? targetLabel
+				? `Frase em ${targetLabel.toLocaleLowerCase('pt-BR')}`
+				: 'Frase no idioma alvo'
+			: targetLabel
+				? `Termo em ${targetLabel.toLocaleLowerCase('pt-BR')}`
+				: 'Termo no idioma alvo'
+	);
+	const rotuloTraducao = $derived(
+		kind === 'pair'
+			? sourceLabel
+				? `Tradução em ${sourceLabel.toLocaleLowerCase('pt-BR')}`
+				: 'Tradução'
+			: sourceLabel
+				? `Sentido em ${sourceLabel.toLocaleLowerCase('pt-BR')}`
+				: 'Sentido'
+	);
+
+	const segmento =
+		'rounded-full px-3.5 py-2 text-[12.5px] font-bold whitespace-nowrap transition-colors';
+	const segmentoOn = 'bg-primary text-primary-content';
+	const segmentoOff = 'text-base-content/65 hover:text-base-content';
+</script>
+
+<div class="flex h-full min-h-0 flex-col bg-base-100">
+	<!-- cabeçalho -->
+	<div class="flex shrink-0 items-start gap-3 border-b border-line px-4 py-4 lg:px-[22px]">
+		<div class="min-w-0 flex-1">
+			<p class="mb-1 font-display text-[20px] font-semibold tracking-[-0.02em]">
+				{editing ? 'Editar material' : wiz ? 'Adicionar material' : 'Novo material'}
+			</p>
+			<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
+				{#if editing}
+					O tipo não muda — ele define a forma do dado que os exercícios já gerados apontam.
+				{:else if wiz}
+					Cole o que você usa em aula. Tudo que entra aqui também vai para a sua biblioteca.
+				{:else}
+					Você cadastra o conteúdo; os exercícios são gerados a partir dele.
+				{/if}
+			</p>
+		</div>
+		{#if onfechar}
+			<button
+				type="button"
+				onclick={onfechar}
+				class="btn btn-sm shrink-0 gap-2 btn-neutral {fecharRotulo
+					? ''
+					: 'w-[38px] px-0'} {fecharSoNoCelular ? 'lg:hidden' : ''}"
+				aria-label={fecharRotulo ?? (wiz ? 'Voltar para os materiais desta atividade' : 'Fechar')}
+			>
+				<svg class="size-[15px] shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+					<path
+						d="M6 6l12 12M18 6L6 18"
+						stroke="currentColor"
+						stroke-width="2.2"
+						stroke-linecap="round"
+					/>
+				</svg>
+				{#if fecharRotulo}<span>{fecharRotulo}</span>{/if}
+			</button>
+		{/if}
+	</div>
+
+	<!-- corpo -->
+	<div class="min-h-0 flex-1 overflow-y-auto px-4 py-5 lg:px-[22px]">
+		<!-- tipo: cartões que dizem o que o aluno faz -->
+		<p class="mb-2.5 text-[11px] font-bold tracking-[0.09em] text-base-content/65 uppercase">
+			{editing ? 'Tipo · travado' : 'O que você quer que o aluno faça'}
+		</p>
+		<input type="hidden" name="kind" value={kernelKind} />
+		<div class="mb-2 grid gap-2 sm:grid-cols-2">
+			{#each TIPOS as t (t.id)}
+				{@const sel = t.id === kind}
+				{@const locked = editing && !sel}
+				<button
+					type="button"
+					onclick={() => escolherTipo(t.id)}
+					disabled={locked}
+					aria-pressed={sel}
+					title={locked ? 'O tipo de um material não muda depois de criado' : t.title}
+					class="flex items-start gap-2.5 rounded-box border-[1.5px] p-3.5 text-start transition-[border-color,background-color,transform] duration-150 enabled:hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45
+					       {sel
+						? 'border-primary bg-primary/6'
+						: 'border-line bg-base-100 enabled:hover:border-primary'}"
+				>
+					<span
+						class="grid size-[30px] shrink-0 place-items-center rounded-field {sel
+							? 'bg-primary text-primary-content'
+							: 'bg-base-300 text-primary'}"
+					>
+						<svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<path
+								d={t.icon}
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							/>
+						</svg>
+					</span>
+					<span class="min-w-0">
+						<span class="mb-0.5 block text-[13.5px] font-bold">{t.label}</span>
+						<span class="block text-[12px] leading-snug text-base-content/65">{t.does}</span>
+					</span>
+				</button>
+			{/each}
+		</div>
+		<p class="mb-[18px] text-[12px] leading-normal text-base-content/65">
+			{editing
+				? 'Para usar outro tipo, crie um material novo.'
+				: 'Escolha pelo exercício que você quer, não pelo formato do arquivo.'}
+		</p>
+
+		<!-- rendimento: o que o conjunto já dá para gerar -->
+		<div
+			class="mb-[18px] flex gap-2.5 rounded-box border p-3.5 {yieldInfo.warn
+				? 'border-warning/35 bg-warning/6'
+				: 'border-line bg-base-200'}"
+		>
+			<svg
+				class="mt-px size-[17px] shrink-0 {yieldInfo.warn ? 'text-warning' : 'text-success'}"
+				viewBox="0 0 24 24"
+				fill="none"
+				aria-hidden="true"
+			>
+				{#if yieldInfo.warn}
+					<path
+						d="M12 4.5l8 14.5H4z"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linejoin="round"
+					/>
+					<path
+						d="M12 10v3.4M12 16.3v.1"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					/>
+				{:else}
+					<path
+						d="M12 20.5a8.5 8.5 0 100-17 8.5 8.5 0 000 17z"
+						stroke="currentColor"
+						stroke-width="2"
+					/>
+					<path
+						d="M8.5 12.2l2.4 2.4 4.6-4.9"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+				{/if}
+			</svg>
+			<div class="min-w-0">
+				<p class="mb-0.5 text-[13px] font-bold {yieldInfo.warn ? 'text-warning' : ''}">
+					{yieldInfo.title}
+				</p>
+				<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
+					{yieldInfo.body}
+				</p>
+			</div>
+		</div>
+
+		<!-- modo de entrada -->
+		{#if !editing}
+			<div
+				class="mb-4 flex w-fit max-w-full flex-wrap gap-[3px] rounded-full border border-line bg-base-200 p-[3px]"
+				role="group"
+				aria-label="Como adicionar"
+			>
+				<button
+					type="button"
+					onclick={() => (modo = 'um')}
+					aria-pressed={modoEfetivo === 'um'}
+					class="{segmento} {modoEfetivo === 'um' ? segmentoOn : segmentoOff}"
+					>Um de cada vez</button
+				>
+				{#if podeColar}
+					<button
+						type="button"
+						onclick={() => (modo = 'lista')}
+						aria-pressed={modoEfetivo === 'lista'}
+						class="{segmento} {modoEfetivo === 'lista' ? segmentoOn : segmentoOff}"
+						>Colar uma lista</button
+					>
+				{/if}
+				<button
+					type="button"
+					onclick={() => (modo = 'ia')}
+					aria-pressed={modoEfetivo === 'ia'}
+					class="{segmento} flex items-center gap-1.5 {modoEfetivo === 'ia'
+						? segmentoOn
+						: segmentoOff}"
+				>
+					<svg class="size-3.5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<path
+							d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9zM18.5 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"
+							stroke="currentColor"
+							stroke-width="1.7"
+							stroke-linejoin="round"
+						/>
+					</svg>
+					Gerar com IA
+				</button>
+			</div>
+		{/if}
+
+		<!-- aviso de edição compartilhada -->
+		{#if editing && editando && editando.usedIn > 0}
+			{@const outras = wiz ? editando.usedIn - 1 : editando.usedIn}
+			<div class="mb-4 flex gap-2.5 rounded-box border border-warning/35 bg-warning/6 p-3.5">
+				<svg
+					class="mt-px size-[17px] shrink-0 text-warning"
+					viewBox="0 0 24 24"
+					fill="none"
+					aria-hidden="true"
+				>
+					<path
+						d="M12 4.5l8 14.5H4z"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linejoin="round"
+					/>
+					<path
+						d="M12 10v3.4M12 16.3v.1"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					/>
+				</svg>
+				<div class="min-w-0">
+					<p class="mb-0.5 text-[13px] font-bold">
+						{#if wiz && outras > 0}
+							Este material também está em {plural(outras, 'outra atividade', 'outras atividades')}
+						{:else if wiz}
+							Este material só está nesta atividade
+						{:else}
+							Este material está em {plural(editando.usedIn, 'atividade', 'atividades')}
+						{/if}
+					</p>
+					<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
+						Salvar muda o que os rascunhos veem. O que já está no ar não muda — a atividade
+						publicada guarda uma cópia congelada.
+					</p>
+				</div>
+			</div>
+		{/if}
+
+		<!-- ══ um de cada vez ══ -->
+		{#if modoEfetivo === 'um'}
+			<div class="grid gap-3.5">
+				{#if kind === 'pair' || kind === 'vocab'}
+					<div>
+						<label for="mf-alvo" class="mb-1.5 flex items-baseline gap-2 text-[12.5px] font-bold">
+							{rotuloAlvo}
+							{#if kind === 'pair'}
+								<span class="text-[11.5px] font-medium text-base-content/65"
+									>o que o aluno vai treinar</span
+								>
+							{/if}
+						</label>
+						<input
+							id="mf-alvo"
+							name="target"
+							bind:value={alvo}
+							bind:this={primeiroCampo}
+							{dir}
+							data-content-lang={contentTag}
+							class="input w-full font-content text-[15px]"
+							placeholder={kind === 'pair' ? EXEMPLO.pair.alvo : EXEMPLO.vocab.alvo}
+						/>
+						{#if repetido}
+							<div
+								class="mt-2 flex feedback-in flex-wrap items-center gap-x-3 gap-y-1.5 rounded-field border border-line bg-base-200 px-3 py-2.5"
+								role="status"
+							>
+								<svg
+									class="size-[15px] shrink-0 text-accent"
+									viewBox="0 0 24 24"
+									fill="none"
+									aria-hidden="true"
+								>
+									<path
+										d="M5 12.5l4.5 4.5L19 7"
+										stroke="currentColor"
+										stroke-width="2.4"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									/>
+								</svg>
+								<span
+									class="min-w-[160px] flex-1 text-[12.5px] leading-normal text-base-content/65"
+								>
+									{#if repetido.noConjunto && wiz}
+										{kind === 'pair' ? 'Esta frase' : 'Este termo'} já está nesta atividade.
+									{:else}
+										Você já tem {kind === 'pair' ? 'esta frase' : 'este termo'}. {kind === 'pair'
+											? 'Ela'
+											: 'Ele'} vai ser {kind === 'pair' ? 'reaproveitada' : 'reaproveitado'}, não {kind ===
+										'pair'
+											? 'duplicada'
+											: 'duplicado'}.
+									{/if}
+								</span>
+							</div>
+						{/if}
+					</div>
+					<div>
+						<label for="mf-trad" class="mb-1.5 block text-[12.5px] font-bold"
+							>{rotuloTraducao}</label
+						>
+						<input
+							id="mf-trad"
+							name="source"
+							bind:value={traducao}
+							class="input w-full font-content text-[14.5px]"
+							placeholder={kind === 'pair' ? EXEMPLO.pair.trad : EXEMPLO.vocab.trad}
+						/>
+					</div>
+					{#if kind === 'pair'}
+						<div>
+							<label for="mf-nota" class="mb-1.5 flex items-baseline gap-2 text-[12.5px] font-bold">
+								Sua nota
+								<span class="text-[11.5px] font-medium text-base-content/65"
+									>opcional · o aluno nunca vê</span
+								>
+							</label>
+							<input
+								id="mf-nota"
+								name="note"
+								bind:value={nota}
+								class="input w-full bg-base-200 text-[14px]"
+								placeholder="Usar depois de ensinar horas"
+							/>
+						</div>
+					{:else}
+						<div>
+							<label
+								for="mf-exemplo"
+								class="mb-1.5 flex items-baseline gap-2 text-[12.5px] font-bold"
+							>
+								Frase de exemplo
+								<span class="text-[11.5px] font-medium text-base-content/65"
+									>opcional · fica guardada para depois</span
+								>
+							</label>
+							<input
+								id="mf-exemplo"
+								name="example"
+								bind:value={exemplo}
+								{dir}
+								data-content-lang={contentTag}
+								class="input w-full bg-base-200 font-content text-[14px]"
+								placeholder="I have breakfast at seven."
+							/>
+						</div>
+					{/if}
+				{:else if kind === 'text'}
+					<div>
+						<label for="mf-titulo" class="mb-1.5 block text-[12.5px] font-bold"
+							>Título do texto</label
+						>
+						<input
+							id="mf-titulo"
+							name="target"
+							bind:value={alvo}
+							bind:this={primeiroCampo}
+							class="input w-full text-[14.5px]"
+							placeholder="Ana's morning"
+						/>
+					</div>
+					<div>
+						<label for="mf-texto" class="mb-1.5 block text-[12.5px] font-bold">O texto</label>
+						<textarea
+							id="mf-texto"
+							name="raw"
+							bind:value={raw}
+							rows="5"
+							{dir}
+							data-content-lang={contentTag}
+							class="textarea w-full font-content text-[14.5px] leading-[1.65]"
+							placeholder="Cole o trecho que você usa em aula"></textarea>
+					</div>
+					<!-- Sem pergunta, `passage-comprehension` devolve zero itens: o texto
+					     entra na lista e não gera nada. -->
+					<input type="hidden" name="questions" value={JSON.stringify(perguntas)} />
+					<div>
+						<div class="mb-2 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+							<span class="text-[12.5px] font-bold">Perguntas de compreensão</span>
+							<span class="text-[11.5px] text-base-content/65"
+								>cada pergunta vira uma questão de escolha</span
+							>
+						</div>
+						<div class="grid gap-2">
+							{#each perguntas as pergunta, i (i)}
+								<div class="flex items-center gap-2">
+									<span
+										class="grid size-6 shrink-0 place-items-center rounded-field bg-base-300 font-mono text-[11.5px] text-primary"
+										aria-hidden="true">{i + 1}</span
+									>
+									<div class="grid min-w-0 flex-1 gap-1.5 sm:grid-cols-2">
+										<input
+											bind:value={pergunta.question}
+											{dir}
+											data-content-lang={contentTag}
+											class="input min-w-0 font-content text-[13.5px]"
+											placeholder="Pergunta"
+											aria-label="Pergunta {i + 1}"
+										/>
+										<input
+											bind:value={pergunta.answer}
+											{dir}
+											data-content-lang={contentTag}
+											class="input min-w-0 font-content text-[13.5px]"
+											placeholder="Resposta certa"
+											aria-label="Resposta da pergunta {i + 1}"
+										/>
+									</div>
+									<button
+										type="button"
+										onclick={() => removerPergunta(i)}
+										class="grid size-[34px] shrink-0 place-items-center rounded-field border border-line text-base-content/65 transition-colors hover:border-error hover:text-error"
+										aria-label="Remover pergunta {i + 1}"
+									>
+										<svg class="size-3.5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+											<path
+												d="M6 6l12 12M18 6L6 18"
+												stroke="currentColor"
+												stroke-width="2.2"
+												stroke-linecap="round"
+											/>
+										</svg>
+									</button>
+								</div>
+							{/each}
+						</div>
+						<button
+							type="button"
+							onclick={adicionarPergunta}
+							class="mt-2 flex min-h-[44px] items-center gap-2 rounded-field border border-dashed border-line px-3.5 text-[13px] font-bold text-primary transition-colors hover:border-primary hover:bg-base-200"
+						>
+							<svg class="size-[15px] shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<path
+									d="M12 5v14M5 12h14"
+									stroke="currentColor"
+									stroke-width="2.2"
+									stroke-linecap="round"
+								/>
+							</svg>
+							Adicionar pergunta
+						</button>
+					</div>
+				{:else}
+					<!-- Falante e fala em campos separados. Colado num bloco só, uma linha
+					     sem "Nome:" caía em A/B alternado sem o professor saber. -->
+					<input type="hidden" name="lines" value={JSON.stringify(falas)} />
+					<div>
+						<div class="mb-2 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+							<span class="text-[12.5px] font-bold">As falas, na ordem certa</span>
+							<span class="text-[11.5px] text-base-content/65"
+								>o aluno vai receber embaralhadas</span
+							>
+						</div>
+						<div class="grid gap-2">
+							{#each falas as fala, i (i)}
+								<div class="flex items-center gap-2">
+									<input
+										bind:value={fala.speaker}
+										maxlength="14"
+										class="w-[52px] shrink-0 rounded-field border border-line bg-base-200 px-1 py-2 text-center text-[12px] font-bold text-primary outline-none focus-visible:border-primary"
+										aria-label="Falante da linha {i + 1}"
+									/>
+									<input
+										bind:value={fala.text}
+										{dir}
+										data-content-lang={contentTag}
+										class="input min-w-0 flex-1 font-content text-[14px]"
+										placeholder="O que essa pessoa diz"
+										aria-label="Fala {i + 1}"
+									/>
+									<span class="flex shrink-0 gap-1">
+										<button
+											type="button"
+											onclick={() => moverFala(i, -1)}
+											disabled={i === 0}
+											class="grid h-[34px] w-8 place-items-center rounded-field border border-line text-base-content/65 transition-colors hover:text-primary disabled:opacity-30"
+											aria-label="Subir a fala {i + 1}"
+										>
+											<svg class="size-[13px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+												<path
+													d="M6 14l6-6 6 6"
+													stroke="currentColor"
+													stroke-width="2.2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+											</svg>
+										</button>
+										<button
+											type="button"
+											onclick={() => moverFala(i, 1)}
+											disabled={i === falas.length - 1}
+											class="grid h-[34px] w-8 place-items-center rounded-field border border-line text-base-content/65 transition-colors hover:text-primary disabled:opacity-30"
+											aria-label="Descer a fala {i + 1}"
+										>
+											<svg class="size-[13px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+												<path
+													d="M6 10l6 6 6-6"
+													stroke="currentColor"
+													stroke-width="2.2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+											</svg>
+										</button>
+										<button
+											type="button"
+											onclick={() => removerFala(i)}
+											disabled={falas.length <= 2}
+											class="grid h-[34px] w-8 place-items-center rounded-field border border-line text-base-content/65 transition-colors hover:border-error hover:text-error disabled:opacity-30"
+											aria-label="Remover a fala {i + 1}"
+										>
+											<svg class="size-[13px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+												<path
+													d="M6 6l12 12M18 6L6 18"
+													stroke="currentColor"
+													stroke-width="2.2"
+													stroke-linecap="round"
+												/>
+											</svg>
+										</button>
+									</span>
+								</div>
+							{/each}
+						</div>
+						<button
+							type="button"
+							onclick={adicionarFala}
+							class="mt-2 flex min-h-[44px] items-center gap-2 rounded-field border border-dashed border-line px-3.5 text-[13px] font-bold text-primary transition-colors hover:border-primary hover:bg-base-200"
+						>
+							<svg class="size-[15px] shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<path
+									d="M12 5v14M5 12h14"
+									stroke="currentColor"
+									stroke-width="2.2"
+									stroke-linecap="round"
+								/>
+							</svg>
+							Adicionar fala de {proximoFalante}
+						</button>
+					</div>
+				{/if}
+			</div>
+
+			<!-- ══ colar uma lista ══ -->
+		{:else if modoEfetivo === 'lista'}
+			<div>
+				<label for="mf-lote" class="mb-1.5 block text-[12.5px] font-bold">
+					{kind === 'vocab' ? 'Um termo por linha' : 'Uma frase por linha'}
+				</label>
+				<textarea
+					id="mf-lote"
+					name="raw"
+					bind:value={lote}
+					bind:this={textareaLote}
+					rows="6"
+					{dir}
+					data-content-lang={contentTag}
+					class="textarea w-full font-content text-[14px] leading-[1.7]"
+					placeholder={kind === 'vocab'
+						? `${EXEMPLO.vocab.alvo} · ${EXEMPLO.vocab.trad}`
+						: `${EXEMPLO.pair.alvo} · ${EXEMPLO.pair.trad}`}></textarea>
+				<div class="mt-2 flex flex-wrap gap-1.5">
+					{#each RAW_SEPARATORS as s (s.mark)}
+						<span
+							class="inline-flex items-center gap-1.5 rounded-full border border-line bg-base-200 px-2.5 py-1 text-[12px] text-base-content/65"
+						>
+							<span class="font-mono text-[12.5px] text-base-content">{s.mark}</span>
+							{s.name}
+						</span>
+					{/each}
+				</div>
+
+				<!-- A prévia sai do MESMO parser do servidor: o que está na tela é
+				     o que vai ser gravado, linha por linha. -->
+				{#if linhasLote.length > 0}
+					<div class="mt-3.5 overflow-hidden rounded-box border border-line">
+						<div
+							class="flex flex-wrap items-center gap-x-3.5 gap-y-2 border-b border-line bg-base-200 px-3.5 py-2.5"
+						>
+							<span class="text-[12.5px] font-bold">
+								{plural(linhasLote.length, 'linha', 'linhas')} · {loteOk}
+								{loteOk === 1 ? 'vira' : 'viram'} material
+							</span>
+							<div class="min-w-1 flex-1"></div>
+							{#if loteRuim > 0}
+								<span
+									class="inline-flex items-center gap-1.5 rounded-full bg-warning/14 px-2.5 py-1 text-[12px] font-bold text-warning"
+								>
+									<svg class="size-[13px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<path
+											d="M12 4.5l8 14.5H4z"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linejoin="round"
+										/>
+										<path
+											d="M12 10v3.2M12 16.2v.1"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+										/>
+									</svg>
+									{loteRuim} sem separador
+								</span>
+							{/if}
+						</div>
+						{#each linhasLote as l, i (i)}
+							<div
+								class="flex items-center gap-2.5 border-b border-line px-3.5 py-2.5 last:border-0 {l.ok
+									? ''
+									: 'bg-warning/6'}"
+							>
+								<span class="w-4 shrink-0 font-mono text-[11.5px] text-base-content/65"
+									>{i + 1}</span
+								>
+								{#if l.ok}
+									<span class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2.5 gap-y-1">
+										<span
+											class="font-content text-[13.5px] font-semibold"
+											{dir}
+											data-content-lang={contentTag}>{l.left}</span
+										>
+										<span class="text-[12.5px] text-base-content/65">{l.right}</span>
+									</span>
+									<svg
+										class="size-[15px] shrink-0 text-success"
+										viewBox="0 0 24 24"
+										fill="none"
+										aria-hidden="true"
+									>
+										<path
+											d="M5 12.5l4.5 4.5L19 7"
+											stroke="currentColor"
+											stroke-width="2.4"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										/>
+									</svg>
+								{:else}
+									<span class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2.5 gap-y-1">
+										<span class="font-content text-[13.5px] text-base-content/65 line-through"
+											>{l.left}</span
+										>
+										<span class="text-[12px] font-bold text-warning">sem separador</span>
+									</span>
+									<button
+										type="button"
+										onclick={() => corrigirLinha(i + 1)}
+										class="btn btn-sm shrink-0 btn-plain text-[12px] text-primary">Corrigir</button
+									>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- ══ gerar com IA ══ -->
+		{:else}
+			<div>
+				<div class="mb-3.5 flex flex-wrap gap-2" role="group" aria-label="De onde a IA parte">
+					{#each FONTES as f (f.id)}
+						{@const sel = f.id === fonte}
+						<button
+							type="button"
+							onclick={() => (fonte = f.id)}
+							aria-pressed={sel}
+							class="flex min-w-[104px] flex-1 items-center gap-2 rounded-field border-[1.5px] px-3 py-2.5 text-start transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5
+							       {sel ? 'border-primary bg-primary/6' : 'border-line bg-base-100 hover:border-primary'}"
+						>
+							<span
+								class="grid size-7 shrink-0 place-items-center rounded-field {sel
+									? 'bg-primary text-primary-content'
+									: 'bg-base-300 text-primary'}"
+							>
+								<svg class="size-[15px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<path
+										d={f.icon}
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									/>
+								</svg>
+							</span>
+							<span class="min-w-0">
+								<span class="block text-[13px] font-bold">{f.label}</span>
+								<span class="block text-[11.5px] text-base-content/65">{f.hint}</span>
+							</span>
+						</button>
+					{/each}
+				</div>
+
+				{#if fonte === 'prompt'}
+					<label for="mf-prompt" class="mb-1.5 block text-[12.5px] font-bold"
+						>O que você quer treinar</label
+					>
+					<textarea
+						id="mf-prompt"
+						bind:value={promptIa}
+						rows="3"
+						class="textarea w-full text-[14px] leading-relaxed"
+						placeholder={promptPlaceholder}></textarea>
+					<div class="mt-2 flex flex-wrap gap-1.5">
+						{#each atalhos as a (a)}
+							<button
+								type="button"
+								onclick={() => usarAtalho(a)}
+								class="min-h-9 rounded-full border border-line bg-base-200 px-3 text-[12px] transition-colors hover:border-primary"
+								>{a}</button
+							>
+						{/each}
+					</div>
+				{:else}
+					<div
+						class="grid place-items-center gap-2 rounded-box border-[1.5px] border-dashed border-line px-4 py-6 text-center"
+					>
+						<span
+							class="grid size-[38px] place-items-center rounded-field bg-accent/12 text-accent"
+						>
+							<svg class="size-[19px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<path
+									d={FONTES.find((f) => f.id === fonte)?.icon}
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								/>
+							</svg>
+						</span>
+						<span class="text-[14px] font-bold"
+							>{fonte === 'video' ? 'Arraste um vídeo' : 'Arraste uma imagem'}</span
+						>
+						<span
+							class="max-w-[46ch] text-[12.5px] leading-normal text-pretty text-base-content/65"
+						>
+							{fonte === 'video'
+								? 'mp4 ou mov, até 10 minutos. A fala é transcrita e vira a base das frases.'
+								: 'Foto da página do livro, da lousa ou do caderno. O texto é lido da imagem.'}
+						</span>
+					</div>
+					{#if fonte === 'video'}
+						<div
+							class="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2.5 rounded-field border border-line bg-base-200 px-3.5 py-3"
+						>
+							<span class="min-w-[150px] flex-1 text-[12.5px] leading-normal text-base-content/65">
+								Trecho a usar — deixe em branco para o vídeo inteiro
+							</span>
+							<span class="flex shrink-0 items-center gap-1.5">
+								<input
+									type="text"
+									placeholder="00:00"
+									class="input h-10 w-[74px] px-2 text-center font-mono text-[13px]"
+									aria-label="Início do trecho"
+								/>
+								<span class="text-[12.5px] text-base-content/65">até</span>
+								<input
+									type="text"
+									placeholder="02:30"
+									class="input h-10 w-[74px] px-2 text-center font-mono text-[13px]"
+									aria-label="Fim do trecho"
+								/>
+							</span>
+						</div>
+					{/if}
+					<div class="mt-2.5 flex gap-2.5 rounded-field border border-line bg-base-200 px-3.5 py-3">
+						<svg
+							class="mt-px size-4 shrink-0 text-accent"
+							viewBox="0 0 24 24"
+							fill="none"
+							aria-hidden="true"
+						>
+							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" />
+							<path
+								d="M12 11v5.5M12 7.6v.1"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+							/>
+						</svg>
+						<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
+							{fonte === 'video'
+								? 'O vídeo não é guardado nem entra na atividade — ele é lido uma vez para virar material de texto. O aluno nunca vê o arquivo.'
+								: 'A imagem não é guardada nem entra na atividade — ela é lida uma vez para virar material de texto. O aluno nunca vê a foto.'}
+						</p>
+					</div>
+				{/if}
+
+				<div class="mt-3.5 flex flex-wrap items-center gap-x-3.5 gap-y-2.5">
+					<span class="text-[12.5px] font-bold">Quantos gerar</span>
+					<div
+						class="flex gap-[3px] rounded-full border border-line bg-base-200 p-[3px]"
+						role="group"
+						aria-label="Quantas propostas"
+					>
+						{#each [5, 10, 20] as n (n)}
+							<button
+								type="button"
+								onclick={() => (quantos = n)}
+								aria-pressed={quantos === n}
+								class="rounded-full px-3.5 py-1.5 font-mono text-[12.5px] transition-colors {quantos ===
+								n
+									? segmentoOn
+									: segmentoOff}">{n}</button
+							>
+						{/each}
+					</div>
+					<span class="text-[12px] text-base-content/65"
+						>você revisa um por um antes de qualquer coisa ser salva</span
+					>
+				</div>
+
+				<!-- O botão existe e o resto da tela também; o que falta é o provedor.
+				     Travado até ele existir — CLAUDE.md "Pendências". -->
+				<button
+					type="button"
+					disabled
+					class="mt-3.5 btn h-12 w-full gap-2 btn-primary text-[14.5px]"
+					title="A geração por IA ainda não está ligada"
+				>
+					<svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<path
+							d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"
+							stroke="currentColor"
+							stroke-width="1.8"
+							stroke-linejoin="round"
+						/>
+					</svg>
+					Gerar {quantos} propostas
+				</button>
+				<p class="mt-2 text-center text-[12px] text-base-content/65">
+					Em breve — a geração por IA ainda não está ligada.
+				</p>
+
+				{#if propostas.length > 0}
+					<div class="mt-4 overflow-hidden rounded-box border border-line">
+						<div
+							class="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-base-200 px-3.5 py-2.5"
+						>
+							<span class="text-[12.5px] font-bold"
+								>{propostas.length} propostas · {nMarcadas} marcadas</span
+							>
+							<div class="min-w-1 flex-1"></div>
+							<button
+								type="button"
+								onclick={marcarTodas}
+								class="p-1 text-[12px] font-bold text-primary"
+							>
+								{nMarcadas === propostas.length ? 'Desmarcar todas' : 'Marcar todas'}
+							</button>
+						</div>
+						{#each propostas as p, i (i)}
+							<div
+								class="flex items-stretch gap-1.5 border-b border-line pe-2.5 {p.on
+									? ''
+									: 'opacity-50'}"
+							>
+								<button
+									type="button"
+									onclick={() => (p.on = !p.on)}
+									aria-pressed={p.on}
+									class="flex min-h-12 min-w-0 flex-1 items-center gap-2.5 ps-3.5 pe-1.5 text-start transition-colors hover:bg-base-200"
+								>
+									<span
+										class="grid size-[22px] shrink-0 place-items-center rounded-[7px] {p.on
+											? 'bg-primary text-primary-content'
+											: 'border-[1.5px] border-line'}"
+									>
+										{#if p.on}
+											<svg class="size-[13px]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+												<path
+													d="M5 12.5l4.5 4.5L19 7"
+													stroke="currentColor"
+													stroke-width="3"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+											</svg>
+										{/if}
+									</span>
+									<span class="min-w-0 flex-1">
+										<span
+											class="mb-0.5 block font-content text-[13.5px] font-semibold"
+											{dir}
+											data-content-lang={contentTag}>{p.esq}</span
+										>
+										<span class="block text-[12.5px] text-base-content/65">{p.dir}</span>
+									</span>
+									{#if p.reused}
+										<span
+											class="shrink-0 rounded-full bg-accent/14 px-2.5 py-1 text-[11.5px] font-bold whitespace-nowrap text-accent"
+											>você já tem</span
+										>
+									{/if}
+								</button>
+							</div>
+						{/each}
+						<p class="bg-base-200 px-3.5 py-2.5 text-[12px] leading-normal text-base-content/65">
+							A IA propõe; quem decide é você. Nada entra na biblioteca antes de você marcar e
+							confirmar — e o que você já tem é reaproveitado, não duplicado.
+						</p>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- resultado do envio -->
+		{#if resultado && !resultado.ok}
+			<p
+				class="mt-4 flex items-center gap-2 rounded-field border-s-[3px] border-error bg-base-200 px-3 py-2.5 text-[13px]"
+				role="alert"
+			>
+				<svg class="size-4 shrink-0 text-error" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+					<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" />
+					<path
+						d="M12 7.5v6M12 16.5h.01"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					/>
+				</svg>
+				{resultado.error}
+			</p>
+		{:else if resultado?.ok && 'ignored' in resultado}
+			<!-- Quantas linhas ficaram de fora é a informação que faltava: colar uma
+			     lista e ver o contador subir menos do que devia, sem saber por
+			     quê, foi o que travou a etapa antes. -->
+			<p
+				class="mt-4 flex items-center gap-2 rounded-field border-s-[3px] border-success bg-base-200 px-3 py-2.5 text-[13px]"
+				role="status"
+			>
+				<svg
+					class="size-4 shrink-0 text-success"
+					viewBox="0 0 24 24"
+					fill="none"
+					aria-hidden="true"
+				>
+					<path
+						d="M4 12.5l5 5L20 6.5"
+						stroke="currentColor"
+						stroke-width="2.6"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+				</svg>
+				{resultado.added} adicionados{resultado.ignored
+					? `, ${resultado.ignored} sem separador ${resultado.ignored === 1 ? 'ignorada' : 'ignoradas'}`
+					: ''}{resultado.reused ? `, ${resultado.reused} você já tinha` : ''}.
+			</p>
+		{:else if resultado?.ok && resultado.reused === true}
+			<!-- Reaproveitar em silêncio parecia falha: o contador não subia e o
+			     professor reenviava a mesma frase. -->
+			<p
+				class="mt-4 flex items-center gap-2 rounded-field border-s-[3px] border-primary bg-base-200 px-3 py-2.5 text-[13px]"
+				role="status"
+			>
+				<svg
+					class="size-4 shrink-0 text-primary"
+					viewBox="0 0 24 24"
+					fill="none"
+					aria-hidden="true"
+				>
+					<path
+						d="M3 5.5h6a3 3 0 013 3v10a2.5 2.5 0 00-2.5-2.5H3zM21 5.5h-6a3 3 0 00-3 3v10a2.5 2.5 0 012.5-2.5H21z"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linejoin="round"
+					/>
+				</svg>
+				Você já tinha este material — ele foi reaproveitado da sua biblioteca, não duplicado.
+			</p>
+		{/if}
+
+		<!-- o que o aluno vai ver -->
+		<div class="mt-[22px]">
+			<p class="mb-2.5 text-[11px] font-bold tracking-[0.09em] text-base-content/65 uppercase">
+				O que o aluno vai ver
+			</p>
+			<div class="overflow-hidden rounded-box border border-line">
+				<div
+					class="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-base-200 px-3.5 py-2.5"
+				>
+					<span class="rounded-full bg-base-300 px-2.5 py-1 text-[12px] font-bold text-primary"
+						>{previa.kind}</span
+					>
+					<span class="text-[12px] text-base-content/65">{previa.note}</span>
+				</div>
+				<div class="px-4 py-[15px]">
+					<p class="mb-2.5 text-[13px] text-base-content/65">{previa.prompt}</p>
+					{#if kind === 'pair'}
+						<div class="flex flex-wrap gap-1.5" {dir} data-content-lang={contentTag}>
+							{#each previa.chips as c, i (i)}
+								<span
+									class="rounded-field border border-line bg-base-200 px-3 py-2 font-content text-[14px]"
+									>{c}</span
+								>
+							{/each}
+						</div>
+					{:else if kind === 'dialogue'}
+						<div class="grid gap-1.5" {dir} data-content-lang={contentTag}>
+							{#each previa.falas as f, i (i)}
+								<span
+									class="flex items-center gap-2.5 rounded-field border border-line bg-base-200 px-3 py-2.5"
+								>
+									<svg
+										class="size-[15px] shrink-0 text-base-content/65"
+										viewBox="0 0 24 24"
+										fill="none"
+										aria-hidden="true"
+									>
+										<path
+											d="M4 8h16M4 12h16M4 16h16"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+										/>
+									</svg>
+									<span class="min-w-0 flex-1 font-content text-[13.5px]">{f}</span>
+								</span>
+							{/each}
+						</div>
+					{:else}
+						<div class="grid gap-1.5">
+							{#each previa.opts as o, i (i)}
+								<span
+									class="flex items-center gap-2.5 rounded-field border px-3 py-2.5 text-[14px] {kind ===
+									'text'
+										? 'font-content'
+										: ''} {o.right ? 'border-success/40 bg-success/10' : 'border-line bg-base-200'}"
+								>
+									<span
+										class="grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-bold {o.right
+											? 'bg-success text-success-content'
+											: 'bg-base-300 text-base-content/65'}">{String.fromCharCode(65 + i)}</span
+									>
+									{o.label}
+								</span>
+							{/each}
+						</div>
+						{#if previa.foot}
+							<p class="mt-2.5 text-[12px] leading-normal text-base-content/65">{previa.foot}</p>
+						{/if}
+					{/if}
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- rodapé -->
+	<div
+		class="flex shrink-0 flex-wrap items-center gap-2.5 border-t border-line bg-base-200 px-4 py-3 lg:px-[22px]"
+	>
+		<span
+			class="hidden min-w-[180px] flex-1 text-[12px] leading-normal text-base-content/65 lg:block"
+			>{footNote}</span
+		>
+		{#if editing}
+			<button type="button" onclick={limpar} class="btn btn-sm btn-ghost">Cancelar</button>
+		{/if}
+		<button
+			type={modoEfetivo === 'ia' ? 'button' : 'submit'}
+			disabled={!podeSalvar}
+			class="btn h-[46px] flex-1 motion-tap gap-2.5 btn-primary text-[14.5px] lg:flex-none lg:px-5"
+		>
+			{#if salvando}
+				<Loading variant="fila" size={12} tone="current" label="Salvando" />
+				Salvando…
+			{:else}
+				{saveLabel}
+			{/if}
+		</button>
+	</div>
+</div>

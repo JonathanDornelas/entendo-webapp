@@ -1,0 +1,176 @@
+---
+paths:
+  - 'prisma/**'
+  - 'src/lib/server/db/**'
+---
+
+# Banco
+
+PostgreSQL 16. Decisão de infra, não negociável.
+
+## Modelo
+
+```
+Teacher ─┬─ Activity ─┬─ ActivityVersion (imutável) ─── Item
+         │            └─ Publication (slug, settings)
+         ├─ ContentUnit
+         ├─ ContentUnit
+         └─ MediaAsset (hash, url, kind, duration, expiresAt)   [10 dias]
+
+Attempt (audioConsent) ─ AttemptItem (answer, score, ms, audioKey, audioExpiresAt)   [7 dias]
+
+Publication ─── Attempt (name, anonId, seed) ─── AttemptItem (answer, score, ms)
+
+Teacher ─┬─ Classroom ─── Student ─┬─ Invite ─── Delivery ─── Publication
+         │                         └─ Attempt (studentId, opcional)
+Job (fila)   StripeEvent (idempotência)
+```
+
+`StudentAccount` é a conta OPCIONAL do aluno, com tabelas próprias de sessão e credencial (a
+segunda instância de Better Auth — auth.md). `Student.accountId` liga a ficha de chamada a ela, e
+só pelo token do convite; `Attempt.accountId` guarda quem respondeu LOGADO. Os dois são
+independentes de `studentId`: dá para responder logado sem estar na chamada de ninguém, e para
+estar na chamada sem ter conta. Os três campos são `SetNull` — apagar conta ou aluno não apaga a
+resposta de terceiro.
+
+`Attempt.studentId` é **opcional, e nulo é o caminho normal**: o aluno entrou pelo link aberto e
+a tentativa vale igual no relatório. Ele só chega preenchido quando o aluno veio por um link
+pessoal, ou quando se identificou depois e as respostas daquele aparelho foram vinculadas. Por
+isso a relação é `onDelete: SetNull` — apagar um aluno cadastrado não pode levar junto a
+tentativa de quem entrou pelo link aberto.
+
+## Versionamento imutável
+
+Se o professor edita a atividade enquanto alunos respondem, tudo desalinha e o relatório dele
+fica errado. `Publication` aponta para uma `ActivityVersion` congelada. Editar cria versão nova;
+o professor decide se republica. `Attempt` guarda a versão com que começou.
+
+Nunca faça `UPDATE` em `ActivityVersion` ou `Item` de uma versão publicada.
+
+`AttemptItem` guarda o retorno do PROFESSOR junto da resposta: `comment`, `reviewedScore` e
+`reviewedAt`. A nota do professor fica **separada** da automática em vez de sobrescrever
+`score` — as duas verdades (o que a máquina achou e o que ele decidiu) é o que permite
+desfazer a correção manual sem recorrigir. `reviewedAt` nulo num item de rubrica significa
+"ainda não corrigida", nunca "errou".
+
+`Activity` guarda `itemTarget` e `skills`: o que a etapa 1 do wizard passou a perguntar. Ficam
+na ATIVIDADE e não na versão porque são preferência do professor — regerar os itens tem que
+respeitar a mesma escolha sem ele repetir nada. A habilidade de cada ITEM continua derivada
+(kernel.md); isto é o filtro aplicado sobre o que os geradores produziram.
+
+`AttemptItem` tem `@@unique([attemptId, itemId])`: **uma resposta por item por tentativa**, e
+`recordAnswer` é `upsert`. Com `create`, voltar para uma questão ou um clique duplo no
+"Verificar" criava uma linha nova e o item contava duas vezes na distribuição de acerto do
+professor — o banco de dev já tinha seis pares duplicados quando a restrição entrou.
+
+`Item.discarded` é a etapa de revisão: descartar MARCA, não apaga — sem isso "Restaurar" não
+teria o que restaurar. A publicação é que remove os descartados de vez, porque a versão
+publicada é imutável e carregar item morto nela não faz sentido.
+
+**Rascunho é uma `ActivityVersion` SEM `Publication`.** É essa a distinção que o código usa
+(`atividades(teacher).draft()`): gerar itens reescreve o rascunho, publicar cria a `Publication`
+que congela aquela mesma versão, e a edição seguinte abre a próxima. Não existe tabela de
+rascunho à parte — e por isso `replaceDraftItems` procura a última versão _sem publicação_ antes
+de escrever qualquer coisa.
+
+**Nada disso tem nome na interface.** `versionNumber` é chave interna: o professor vê uma
+atividade só, com estado (rascunho / no ar / no ar com mudanças por publicar). Ver paginas.md.
+Duas consequências no repositório, as duas nascidas de bug:
+
+- **`draftFromPublished(activityId)`** é o que "Editar atividade" usa. Publicar apaga o
+  rascunho, então a tela de revisão abria VAZIA depois de publicar — a atividade sumia da frente
+  do professor e o único caminho era gerar tudo de novo. A função devolve o rascunho quando já
+  existe e, quando não, CLONA os itens do que está no ar numa versão nova. A publicada não é
+  tocada (regra nº 7). É idempotente porque é chamada de um loader.
+- **`publishDraft` move o link.** `Publication.slug` é `@unique` no produto inteiro, então
+  republicar com o mesmo endereço estourava `Publication_slug_key`: o professor clicava,
+  aparentemente nada acontecia, e sobrava uma versão sem publicação. A publicação anterior
+  **não** é apagada (as tentativas apontam para ela) — o slug dela vira `<slug>~<versão>`, que
+  nenhum professor consegue escolher (o dele é `^[a-z0-9-]+$`, sem `~`). Quem está respondendo
+  não sente nada: o Player resolve a questão pelo `attemptId`, não pelo slug.
+
+`Activity` guarda `sourceLang`/`targetLang` (tags de `LanguageProfile`): o par é escolhido na
+etapa 1, antes de existir qualquer item, e define tokenização, direção e normalização.
+
+## MediaAsset — o áudio é identificado pelo CONTEÚDO
+
+**A identidade é `hash(texto, voz, velocidade)`, única por professor.** A chave no bucket é
+`tts/<teacherId>/<hash>.mp3`, e a voz também sai do texto (`vozDoTexto`).
+
+O dono passou por quatro lugares, e a história é o desenho:
+
+1. **Hash global** — economizava tudo, mas a atividade publicada no 9º dia herdava um arquivo
+   que morria no 10º.
+2. **Atividade** — sobrevivia à expiração e sintetizava a mesma frase de novo a cada atividade.
+3. **Material** — parecia certo, porque é de onde o texto sai. Não era: material é um
+   FACILITADOR de montagem, e com `onDelete: Cascade` apagar um da biblioteca derrubava o áudio
+   de uma atividade NO AR — o link ia a 503, a entrada tentava repor, e o worker estourava em
+   foreign key até o job ir para `failed`. O link não voltava nunca mais.
+4. **Conteúdo, escopado por professor** — o que está aqui.
+
+O que a quarta resolve que as outras não: a atividade não depende de nada que o professor possa
+jogar fora, a mesma frase em dois materiais é UM arquivo, e regerar funciona sempre porque o
+texto está congelado no item (regra nº 7), não no material. A rede que tornou tudo isso seguro
+foi a entrada do Player REPOR o áudio vencido (server.md "TTS").
+
+Linha vencida é varrida por `enfileirarAudioFaltante`, que é onde se sabe que existe lixo: ela
+já contava como ausente em toda leitura, então não servia para mais nada.
+
+`expiresAt` é a MESMA data que a regra de ciclo de vida do bucket vai usar (server.md "TTS"):
+o MinIO apaga o objeto sozinho, e esta coluna é o que permite a consulta saber disso sem ir ao
+storage. Toda leitura de mídia filtra por `expiresAt: { gt: new Date() }` — uma linha vencida
+conta como AUSENTE, e é isso que faz a entrada do Player pedir a síntese de novo em vez de
+servir uma URL morta.
+
+Regenerar reescreve `url` e `expiresAt` na mesma linha (`upsert`), nunca cria uma segunda.
+
+## A gravação do aluno — 7 dias, e só com autorização
+
+`AttemptItem.audioKey` guarda a CHAVE no bucket, não uma URL: o objeto é privado e quem serve é
+uma rota do Studio que confere o dono (auth.md "A gravação de voz"). `audioExpiresAt` espelha a
+regra de ciclo de vida de `fala/`, que são **7 dias** — menos que os 10 do áudio de atividade,
+porque aquele se regenera a partir do texto e este é a voz de uma pessoa, gravada uma vez.
+
+As duas colunas só são preenchidas quando `Attempt.audioConsent` é verdadeiro. Esse campo fica
+na TENTATIVA e não no aluno porque é isso que a pergunta significa: ele autorizou esta atividade,
+neste dia.
+
+## JSON no Postgres
+
+`Item.prompt`, `Item.interaction`, `Item.grading`, `Item.locale` e `Publication.settings` são
+JSON — o Prisma mapeia o tipo `Json` do schema para `jsonb` por padrão no Postgres.
+
+- **Sempre valide com Zod ao ler.** O tipo do Prisma para JSON não garante nada.
+- Para filtrar por dentro do JSON, crie um índice `GIN` sobre a coluna `jsonb` (ou uma expressão
+  específica, ex. `(interaction->>'type')`). Faça isso reativamente, quando a query aparecer —
+  não preventivamente.
+- Não use full-text nativo do Postgres para conteúdo multilíngue — a configuração de idioma do
+  `tsvector` é por coluna, não por linha, e este produto mistura idiomas na mesma tabela. Se
+  busca virar requisito, plugue um mecanismo externo. Não é problema de MVP.
+
+## Repositórios
+
+Todo acesso a dado de professor passa por `$lib/server/db/repos/`, que exige o `Teacher` e
+injeta o `teacherId` no filtro. Ver `.claude/rules/auth.md`.
+
+`materiais(teacher).createForActivity` **reaproveita em vez de duplicar**: antes de criar, ele
+procura um material equivalente do mesmo professor (`findEquivalent` — igualdade de `jsonb`,
+que ignora a ordem das chaves, mais o mesmo `kind`) e liga aquele à atividade. Cadastrar a
+mesma frase duas vezes criava duas linhas na biblioteca e o professor passava a ver duplicatas
+que ele não fez. Ele devolve `{ id, reused }` — é o `reused` que a tela mostra como
+"biblioteca".
+
+O Player tem repositórios próprios, sem professor, com superfície mínima: resolver publicação
+por slug, criar tentativa, gravar resposta.
+
+Loader de página pode ler agregado direto do `prisma` (contagem de acerto, tentativas) — o que
+ele NÃO pode é ler sem escopo: o `teacherId` entra no `where` mesmo quando a atividade já foi
+resolvida pelo repositório. Repetir o escopo não custa nada e é ele que impede o vazamento.
+
+## Migrations
+
+`prisma migrate dev` em desenvolvimento, `prisma migrate deploy` no CI. Nunca edite migration
+já aplicada. Nunca `db push` fora de protótipo local.
+
+Migration que renomeia ou remove coluna com dado precisa de passo de cópia antes — este produto
+tem dado de aluno que não pode ser perdido.

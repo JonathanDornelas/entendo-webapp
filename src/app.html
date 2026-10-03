@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="text-scale" content="scale" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+		<link
+			rel="stylesheet"
+			href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Noto+Sans:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap"
+		/>
+		<!--
+			Tema aplicado ANTES da primeira pintura: sem isto a página nasce clara
+			e pisca para escura no primeiro frame do JS. Claro é o padrão — a
+			preferência do sistema não escolhe sozinha, só a escolha explícita do
+			professor conta (ver $lib/client/theme.svelte.ts).
+		-->
+		<script>
+			document.documentElement.dataset.theme =
+				localStorage.getItem('entendo-theme') === 'dark' ? 'dark' : 'light';
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

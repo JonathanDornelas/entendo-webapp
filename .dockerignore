@@ -1,0 +1,21 @@
+# O que não pode entrar na imagem.
+node_modules
+.git
+.svelte-kit
+build
+generated
+test-results
+playwright-report
+
+# Segredo. O compose injeta as variáveis em runtime; uma cópia do `.env`
+# assada na imagem viajaria junto com ela.
+.env
+.env.*
+!.env.example
+
+# Trabalho e notas, não produto.
+_meu
+_ref
+_ver.mjs
+docs
+e2e
