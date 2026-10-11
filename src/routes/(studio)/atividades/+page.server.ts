@@ -1,4 +1,5 @@
 import type { PageServerLoad } from './$types';
+import { nivelOuNulo } from '$lib/atividades/nivel';
 import { requireTeacher } from '$lib/server/auth/guard';
 import { atividades } from '$lib/server/db/repos/activities';
 import { prisma } from '$lib/server/db/client';
@@ -64,9 +65,15 @@ export const load: PageServerLoad = async ({ locals }) => {
 			itemCount: current?.items.length ?? 0,
 			skills: [...skills],
 			language: labelForTag(activity.targetLang),
+			/** A tag de idioma (`$lib/idiomas.ts`) — o chip e o filtro da lista. */
+			idioma: activity.targetLang,
 			// O snapshot de versão é interno (regra nº 7); para o professor a
 			// atividade é uma só, e o que importa aqui é se ela está no ar.
 			noAr: !!publishedVersion,
+			// Arquivada: fora do limite do plano, link fechado para quem não começou.
+			arquivada: activity.archivedAt !== null,
+			level: nivelOuNulo(activity.level),
+			modulos: activity.modules.map((m) => m.module),
 			attempts: publishedVersion ? (attempts ?? 0) : null,
 			// Turma cadastrada ainda não existe no produto — sem total previsto,
 			// a tela mostra só o número de tentativas.
@@ -110,7 +117,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 		? Math.round((respostas.filter((r) => r.score >= 1).length / totalRespostas) * 100)
 		: 0;
 
-	const publishedCount = activities.filter((a) => a.noAr).length;
+	const ativas = activities.filter((a) => !a.arquivada);
+	const publishedCount = ativas.filter((a) => a.noAr).length;
 
 	return {
 		teacher: { firstName: teacher.name.split(/\s+/)[0] ?? teacher.name },
@@ -119,8 +127,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 		// uma ida ao servidor por clique de chip não compraria nada.
 		activities,
 		totalCount: activities.length,
+		activeCount: ativas.length,
+		archivedCount: activities.length - ativas.length,
 		publishedCount,
-		draftCount: activities.length - publishedCount,
+		draftCount: ativas.length - publishedCount,
 		resume,
 		mes: {
 			nome: new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(new Date()),

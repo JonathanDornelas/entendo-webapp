@@ -11,7 +11,7 @@
 
 	// Cabeçalho público — mesmo desenho na home e nas páginas institucionais
 	// (paginas.md "Grupo (site)"). O default aponta pra seções da home; quem usa
-	// fora dela (site.md) passa a própria nav. `extra` é o único ponto de
+	// fora dela (paginas.md "Grupo (site)") passa a própria nav. `extra` é o único ponto de
 	// extensão: só a home usa (o toggle de tema manual — home.md "Toggle de
 	// tema" — é exclusivo dela, as páginas institucionais seguem o sistema).
 	// Âncoras da home, mais "Planos" — a única entrada da nav que é uma ROTA, e
@@ -47,5 +47,5 @@
 
 	{#if extra}{@render extra()}{/if}
 
-	<Button href={resolve('/(studio)/atividades')} class="no-underline">Entrar no Studio</Button>
+	<Button href={resolve('/(studio)/inicio')} class="no-underline">Entrar no Studio</Button>
 </header>

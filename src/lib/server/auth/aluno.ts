@@ -5,6 +5,8 @@ import { getRequestEvent } from '$app/server';
 import { env } from '$env/dynamic/private';
 import { baseURL, trustedOrigins } from './base-url';
 import { prisma } from '$lib/server/db/client';
+import { sortearCodigo } from '$lib/avatar/montar';
+import { VALIDADE_DO_LINK_S, pedirRedefinicaoDeSenha } from './senha';
 
 /**
  * A conta do ALUNO. Segunda instância do Better Auth, com tabelas próprias e
@@ -47,22 +49,29 @@ export const authAluno = betterAuth({
 			 * dono do repositório** — a regra acima existe justamente para isto.
 			 * O que o aprovou: não é dado COLETADO nem observado, é escolha de
 			 * enfeite; não identifica ninguém (dezoito índices de peça de desenho,
-			 * sem texto livre onde caiba um nome); e é opcional, então uma conta
-			 * que nunca abre o editor continua sendo só nome, e-mail e senha.
+			 * sem texto livre onde caiba um nome); e quem escolhe é a pessoa — a
+			 * conta nasce com um sorteado (o hook abaixo), e trocar é opcional.
 			 */
-			avatar: { type: 'string', required: false }
+			// `input: false`: o único escritor é `gravarMeuAvatar` (aluno.remote.ts),
+			// que valida pelo `codigoDeAvatarSchema`. Sem isto, `POST
+			// /api/auth-aluno/update-user` gravava qualquer texto direto.
+			avatar: { type: 'string', required: false, input: false }
 		}
 	},
 	session: { modelName: 'studentSession' },
 	account: { modelName: 'studentCredential' },
 	verification: { modelName: 'studentVerification' },
+	// A conta nasce com um avatar SORTEADO — enfeite gerado pelo sistema, não
+	// dado coletado (a nota do campo acima vale igual): sem isto o aluno
+	// aparecia como iniciais até abrir o editor.
+	databaseHooks: {
+		user: { create: { before: async (user) => ({ data: { ...user, avatar: sortearCodigo() } }) } }
+	},
 	emailAndPassword: {
 		enabled: true,
-		// Mesmo provedor indefinido do resto (CLAUDE.md "Pendências"): até
-		// existir um, o link de redefinição só sai no console. Bloqueia produção.
-		sendResetPassword: async ({ user, url }) => {
-			console.log(`[auth-aluno] link de redefinição para ${user.email}: ${url}`);
-		}
+		// O mesmo caminho do professor (`./senha.ts`): e-mail pela fila, link de 1 hora.
+		resetPasswordTokenExpiresIn: VALIDADE_DO_LINK_S,
+		sendResetPassword: ({ user, url }) => pedirRedefinicaoDeSenha('aluno', user, url)
 	},
 	plugins: [sveltekitCookies(getRequestEvent)]
 });

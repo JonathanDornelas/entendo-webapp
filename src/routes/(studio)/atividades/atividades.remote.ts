@@ -3,7 +3,15 @@ import { command, form, getRequestEvent, query } from '$app/server';
 import { error, redirect } from '@sveltejs/kit';
 import { resolve } from '$app/paths';
 import { requireTeacher } from '$lib/server/auth/guard';
-import { can } from '$lib/server/billing/entitlements';
+import { motivoDoBloqueio } from '$lib/server/billing/entitlements';
+import { acessoDoProfessor } from '$lib/server/billing/acesso';
+import { comCota, motivoDeCriar } from '$lib/server/billing/cota';
+import { nivelOuNulo, nivelSchema } from '$lib/atividades/nivel';
+import {
+	MAX_LINHAS_POR_LOTE,
+	avisoDeLimite,
+	gravarMateriais
+} from '$lib/server/atividades/gravar-materiais';
 import { atividades } from '$lib/server/db/repos/activities';
 import { materiais } from '$lib/server/db/repos/content-units';
 import { isTtsConfigured } from '$lib/server/tts';
@@ -24,6 +32,7 @@ import { interactionKindSchema, interactionSchema, promptSchema } from '$lib/ker
 import type { Skill } from '$lib/kernel/interactions/types';
 import { getInteraction } from '$lib/kernel/interactions/registry';
 import { transcritorPara } from '$lib/server/escrita';
+import { liberarEnviosQueEsperavamPublicacao } from '$lib/server/modulos/programacao';
 import type { Prisma } from '../../../../generated/prisma/client.ts';
 
 /**
@@ -46,6 +55,72 @@ async function activityOr404(activityId: string) {
 	return { teacher, activity };
 }
 
+/**
+ * Atividade arquivada está fora do estoque e com o link fechado para quem não
+ * começou (docs/adr-002-billing.md): gerar, regerar áudio e publicar exigem
+ * desarquivar antes — que é onde a vaga do plano é conferida.
+ */
+function recusarArquivada(activity: { archivedAt: Date | null }) {
+	if (activity.archivedAt) error(409, 'Esta atividade está arquivada. Desarquive para mexer nela.');
+}
+
+/**
+ * Arquivar: libera a vaga do plano, fecha o link para quem ainda não começou e
+ * guarda os resultados. Quem está no meio de uma tentativa termina.
+ */
+export const arquivarAtividade = command(
+	z.object({ activityId: z.string() }),
+	async ({ activityId }) => {
+		const { teacher } = await activityOr404(activityId);
+		return { ok: await atividades(teacher).arquivar(activityId) };
+	}
+);
+
+/** Desarquivar volta a ocupar vaga — conferida dentro da trava de cota. */
+export const desarquivarAtividade = command(
+	z.object({ activityId: z.string() }),
+	async ({ activityId }) => {
+		const teacher = teacherOf();
+		return comCota(teacher, 'atividades', 1, async (tx, cabem, estado) => {
+			const repo = atividades(teacher, tx);
+			if (!(await repo.byId(activityId))) error(404, 'Atividade não encontrada');
+			if (cabem < 1) {
+				return {
+					ok: false as const,
+					motivo: motivoDeCriar(estado, 'atividades'),
+					error: 'Não cabe no seu plano: arquive outra atividade antes, ou escolha um plano maior.'
+				};
+			}
+			return { ok: await repo.desarquivar(activityId) };
+		});
+	}
+);
+
+/**
+ * Apagar DE VEZ, com tentativas e resultados. A tela pede para digitar o
+ * título antes — `confirmacao` é conferida aqui também, porque toda remote
+ * function é endpoint público e um POST direto não passa pela tela.
+ */
+export const apagarAtividade = command(
+	z.object({ activityId: z.string(), confirmacao: z.string() }),
+	async ({ activityId, confirmacao }) => {
+		const { teacher, activity } = await activityOr404(activityId);
+		if (confirmacao.trim() !== activity.title.trim()) {
+			return { ok: false as const, error: 'Digite o título exatamente como está para apagar.' };
+		}
+		return { ok: await atividades(teacher).apagarDeVez(activityId) };
+	}
+);
+
+/** Troca o nível da atividade. Vale na hora para quem abrir o link — é rótulo, não versão. */
+export const definirNivel = command(
+	z.object({ activityId: z.string(), level: nivelSchema.nullable() }),
+	async ({ activityId, level }) => {
+		const { teacher } = await activityOr404(activityId);
+		return { ok: await atividades(teacher).definirNivel(activityId, level) };
+	}
+);
+
 export const criarAtividade = form(
 	z.object({
 		title: z.string().min(1, 'Dê um título para a atividade'),
@@ -65,9 +140,15 @@ export const criarAtividade = form(
 		 * campo só — mesmo padrão de `questions`/`lines` na etapa 2. Vazio =
 		 * todas.
 		 */
-		skills: z.string().optional()
+		skills: z.string().optional(),
+		/**
+		 * O nível (CEFR), OPCIONAL — um rótulo, não muda os exercícios
+		 * (`$lib/atividades/nivel.ts`). Fora da escala é descartado em silêncio,
+		 * como as habilidades: é um POST forjado, não erro do professor.
+		 */
+		level: z.string().optional()
 	}),
-	async ({ title, targetLang, sourceLang, itemTarget, skills }) => {
+	async ({ title, targetLang, sourceLang, itemTarget, skills, level }) => {
 		const teacher = teacherOf();
 		const pedido = Number.parseInt(itemTarget ?? '', 10);
 		const alvo = Number.isFinite(pedido) ? Math.min(Math.max(pedido, 1), MAX_ITENS) : 12;
@@ -79,16 +160,37 @@ export const criarAtividade = form(
 		// um erro do professor a explicar na tela.
 		const validas = desejadas.filter((s) => skillSchema.safeParse(s).success);
 
-		const activity = await atividades(teacher).create(
-			title.trim(),
-			tagForLabel(sourceLang),
-			tagForLabel(targetLang),
-			{
-				itemTarget: alvo,
-				skills: validas.length > 0 ? validas : ['listening', 'speaking', 'reading', 'writing']
-			}
-		);
-		redirect(303, resolve('/(studio)/atividades/[id]/materiais', { id: activity.id }));
+		// Cota de ESTOQUE (docs/adr-002-billing.md): conta e cria dentro da mesma
+		// trava, senão duas abas criando juntas passavam do limite.
+		const criada = await comCota(teacher, 'atividades', 1, async (tx, cabem, estado) => {
+			if (cabem < 1) return { motivo: motivoDeCriar(estado, 'atividades') };
+			const activity = await atividades(teacher, tx).create(
+				title.trim(),
+				tagForLabel(sourceLang),
+				tagForLabel(targetLang),
+				{
+					itemTarget: alvo,
+					skills: validas.length > 0 ? validas : ['listening', 'speaking', 'reading', 'writing'],
+					level: nivelOuNulo(level)
+				}
+			);
+			return { id: activity.id };
+		});
+		if ('motivo' in criada) {
+			// O rascunho não chegou a existir, então não há o que "continuar salvo":
+			// a tela mostra o motivo e o caminho (`/planos?motivo=`).
+			return {
+				ok: false as const,
+				motivo: criada.motivo,
+				error:
+					criada.motivo === 'criar'
+						? 'Você chegou ao limite de atividades do seu plano.'
+						: criada.motivo === 'trial'
+							? 'O período de teste acabou.'
+							: 'Seu plano não permite criar atividades agora.'
+			};
+		}
+		redirect(303, resolve('/(studio)/atividades/[id]/materiais', { id: criada.id }));
 	}
 );
 
@@ -108,13 +210,21 @@ export const adicionarMaterial = form(
 
 		// Material igual a um que o professor já tem é REAPROVEITADO, não
 		// duplicado — a biblioteca é dele e duas linhas com a mesma frase são
-		// duas coisas para manter em dia sem ganhar nada.
-		const { reused } = await materiais(teacher).createForActivity(
-			activityId,
-			campos.kind,
-			montado.dados
-		);
-		return { ok: true as const, added: 1, reused };
+		// duas coisas para manter em dia sem ganhar nada. E o novo respeita o
+		// estoque do plano (`gravarMateriais`).
+		const r = await gravarMateriais(teacher, {
+			kind: campos.kind,
+			unidades: [montado.dados],
+			activityId
+		});
+		if (r.foraDoLimite > 0) {
+			return {
+				ok: false as const,
+				error: avisoDeLimite(r) ?? 'Não coube no plano.',
+				motivo: r.motivo
+			};
+		}
+		return { ok: true as const, added: 1, reused: r.reaproveitados > 0 };
 	}
 );
 
@@ -142,18 +252,31 @@ export const adicionarMateriaisEmLote = form(
 			};
 		}
 
-		let reaproveitados = 0;
-		for (const dados of unidades) {
-			const { reused } = await materiais(teacher).createForActivity(activityId, kind, dados);
-			if (reused) reaproveitados++;
+		if (unidades.length > MAX_LINHAS_POR_LOTE) {
+			return {
+				ok: false as const,
+				error: `Cole até ${MAX_LINHAS_POR_LOTE} linhas por vez.`
+			};
+		}
+
+		const r = await gravarMateriais(teacher, { kind, unidades, activityId });
+		if (r.criados === 0 && r.reaproveitados === 0) {
+			return {
+				ok: false as const,
+				error: avisoDeLimite(r) ?? 'Nada coube no plano.',
+				motivo: r.motivo
+			};
 		}
 		return {
 			ok: true as const,
-			added: unidades.length,
+			added: r.criados + r.reaproveitados,
 			ignored: linhas - unidades.length,
 			// Colar a lista da aula passada de novo é comum — dizer quantas linhas
 			// já existiam evita o professor achar que duplicou tudo.
-			reused: reaproveitados
+			reused: r.reaproveitados,
+			foraDoLimite: r.foraDoLimite,
+			aviso: avisoDeLimite(r),
+			motivo: r.motivo
 		};
 	}
 );
@@ -232,6 +355,8 @@ export const materiaisDisponiveis = query(
 					kind,
 					primary,
 					secondary,
+					/** A tag de idioma — o painel filtra pelo idioma da atividade. */
+					idioma: m.targetLang,
 					note: 'note' in dados ? (dados.note ?? '') : '',
 					example: 'example' in dados ? (dados.example ?? '') : ''
 				};
@@ -257,6 +382,7 @@ export const removerMaterial = command(
  */
 export const gerarItens = command(z.object({ activityId: z.string() }), async ({ activityId }) => {
 	const { teacher, activity } = await activityOr404(activityId);
+	recusarArquivada(activity);
 
 	// Só o material DESTA atividade — a biblioteca inteira geraria itens de
 	// conteúdo que não pertence a ela.
@@ -346,6 +472,9 @@ export const regerarAudio = command(
 	z.object({ activityId: z.string() }),
 	async ({ activityId }) => {
 		const { teacher, activity } = await activityOr404(activityId);
+		// Arquivada não tem link aberto para novas tentativas: regerar áudio ali
+		// seria síntese para ninguém.
+		recusarArquivada(activity);
 
 		const [draft, published] = await Promise.all([
 			atividades(teacher).draft(activityId),
@@ -468,18 +597,25 @@ export const publicarAtividade = form(
 		const requireCode = requireCodeRaw !== undefined;
 		const showResult = showResultRaw !== undefined;
 		const { teacher, activity } = await activityOr404(activityId);
+		if (activity.archivedAt) {
+			return { ok: false, error: 'Esta atividade está arquivada. Desarquive para publicar.' };
+		}
 
 		// Ponto único de decisão de acesso — nunca espalhe
 		// `subscriptionStatus === 'active'` (billing.md "Entitlements").
-		if (!can(teacher, 'publicar_atividade')) {
+		const bloqueio = motivoDoBloqueio(await acessoDoProfessor(teacher), 'publicar_atividade');
+		if (bloqueio) {
 			// `motivo` existe para a TELA poder oferecer o caminho de saída
-			// (`/planos?motivo=publicar`) sem ler a frase de erro por dentro:
-			// comparar string de mensagem quebra no dia em que alguém melhora o
-			// texto. O rascunho continua salvo — publicar é o que não acontece.
+			// (`/planos?motivo=…`) sem ler a frase de erro por dentro: comparar
+			// string de mensagem quebra no dia em que alguém melhora o texto. O
+			// rascunho continua salvo — publicar é o que não acontece.
 			return {
 				ok: false,
-				error: 'Sua assinatura não permite publicar agora.',
-				motivo: 'assinatura' as const
+				error:
+					bloqueio === 'trial'
+						? 'O período de teste acabou. Escolha um plano para publicar.'
+						: 'Seu plano não permite publicar agora.',
+				motivo: bloqueio
 			};
 		}
 
@@ -546,6 +682,11 @@ export const publicarAtividade = form(
 			showResult
 		});
 		if (!publication) return { ok: false, error: 'Nada para publicar.' };
+
+		// O envio programado de um módulo que esperava esta atividade sair do
+		// rascunho sai agora, na próxima volta do worker — sem o professor ter de
+		// achar o "tentar de novo" (docs/telas-modulos-professor.md 2.4).
+		await liberarEnviosQueEsperavamPublicacao(teacher.id, activityId);
 
 		// "pendente" é o que FALTA, não o total: republicar uma atividade cujo
 		// áudio já está pronto não pode dizer ao professor que ele vai esperar.

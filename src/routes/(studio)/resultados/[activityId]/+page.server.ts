@@ -10,8 +10,9 @@ import {
 	quando,
 	type AnswerState
 } from '$lib/server/resultados/leitura';
-import { resumoDoItem } from '$lib/server/atividades/resumo';
-import { gradingSchema, interactionSchema } from '$lib/kernel/item';
+import { rotuloDoItem } from '$lib/server/player/rotulo';
+import { gradingSchema, interactionSchema, promptSchema } from '$lib/kernel/item';
+import { idiomaOuNulo } from '$lib/idiomas';
 
 /**
  * Como foi uma atividade: os itens por dificuldade e as tentativas.
@@ -32,7 +33,14 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 		orderBy: { createdAt: 'desc' },
 		include: {
 			activityVersion: { include: { items: { orderBy: { order: 'asc' } } } },
-			attempts: { include: { items: true }, orderBy: { startedAt: 'desc' } }
+			attempts: {
+				include: {
+					items: true,
+					account: { select: { avatar: true } },
+					student: { select: { account: { select: { avatar: true } } } }
+				},
+				orderBy: { startedAt: 'desc' }
+			}
 		}
 	});
 
@@ -53,14 +61,13 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 	const attempts: {
 		id: string;
 		initials: string;
+		avatar: string | null;
 		name: string;
 		when: string;
 		duration: string;
 		startedAt: Date;
 		itemStates: (AnswerState | 'empty')[];
 	}[] = [];
-
-	let pendingWriting = 0;
 
 	for (const publicacao of publicacoes) {
 		const itensDaPublicacao = publicacao.activityVersion.items;
@@ -69,7 +76,6 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 
 			for (const linha of tentativa.items) {
 				const estado = estadoDaResposta(linha, porRubrica.has(linha.itemId));
-				if (estado === 'pending') pendingWriting++;
 				const alvo = estatistica.get(linha.itemId);
 				if (alvo && estado !== 'pending') alvo[estado]++;
 			}
@@ -77,6 +83,7 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			attempts.push({
 				id: tentativa.id,
 				initials: iniciais(tentativa.name),
+				avatar: tentativa.account?.avatar ?? tentativa.student?.account?.avatar ?? null,
 				name: tentativa.name,
 				when: quando(tentativa.startedAt),
 				duration: duracao(tentativa.startedAt, tentativa.finishedAt),
@@ -102,7 +109,13 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			return {
 				id: item.id,
 				index: posicao + 1,
-				interactionLabel: `${resumoDoItem(item.generatedBy)} · ${interactionSchema.parse(item.interaction).type}`,
+				// O que o ALUNO fez ("montar frase", "escuta"), não a chave técnica —
+				// a mesma palavra do resultado do Player (`rotuloDoItem`).
+				interactionLabel: rotuloDoItem(
+					promptSchema.parse(item.prompt),
+					interactionSchema.parse(item.interaction).type,
+					gradingSchema.parse(item.grading).mode
+				),
 				correct: pct(stat.correct),
 				partial: pct(stat.partial),
 				incorrect: pct(stat.incorrect),
@@ -123,19 +136,43 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 		);
 
 	const corrigidas = items.reduce((total, i) => total + i.respostas, 0);
-	const acertoMedio =
+	const media = (campo: 'correct' | 'partial') =>
 		corrigidas === 0
-			? 0
-			: Math.round(items.reduce((total, i) => total + i.correct * i.respostas, 0) / corrigidas);
+			? null
+			: Math.round(items.reduce((total, i) => total + i[campo] * i.respostas, 0) / corrigidas);
+	const acertoMedio = media('correct');
+	const parcialMedio = media('partial');
+
+	// Quem recebeu convite pessoal desta atividade, em qualquer turma — o
+	// "N alunos convidados" do cabeçalho. Aluno distinto, não convite.
+	const convidados = await prisma.invite.findMany({
+		where: { delivery: { publicationId: { in: publicacoes.map((p) => p.id) } } },
+		distinct: ['studentId'],
+		select: { studentId: true }
+	});
 
 	return {
-		activity: { id: activity.id, title: activity.title, noAr },
+		activity: {
+			id: activity.id,
+			title: activity.title,
+			noAr,
+			idioma: idiomaOuNulo(activity.targetLang),
+			convidados: convidados.length
+		},
+		// Verde e âmbar aqui SÃO a semântica de correção (acerto e parcial), o
+		// único lugar onde essas cores podem estar.
 		stats: [
-			{ value: String(attempts.length), label: 'tentativas' },
-			{ value: `${acertoMedio}%`, label: 'acerto médio', tone: 'text-success' },
-			...(pendingWriting > 0
-				? [{ value: String(pendingWriting), label: 'a comentar', tone: 'text-warning' }]
-				: [])
+			{ value: String(attempts.length), label: attempts.length === 1 ? 'tentativa' : 'tentativas' },
+			{
+				value: acertoMedio === null ? '—' : `${acertoMedio}%`,
+				label: 'acerto médio',
+				tone: 'text-success'
+			},
+			{
+				value: parcialMedio === null ? '—' : `${parcialMedio}%`,
+				label: 'parcial',
+				tone: 'text-warning'
+			}
 		],
 		// `respostas` e `startedAt` são de ORDENAÇÃO, não de tela: tudo que uma
 		// remote function ou um loader devolve é serializado para o browser, então
@@ -151,11 +188,11 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 		attempts: attempts.map((tentativa) => ({
 			id: tentativa.id,
 			initials: tentativa.initials,
+			avatar: tentativa.avatar,
 			name: tentativa.name,
 			when: tentativa.when,
 			duration: tentativa.duration,
 			itemStates: tentativa.itemStates
-		})),
-		pendingWriting
+		}))
 	};
 };

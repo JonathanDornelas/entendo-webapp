@@ -27,7 +27,12 @@ export const playerRepo = {
 								title: true,
 								sourceLang: true,
 								targetLang: true,
-								teacherId: true
+								teacherId: true,
+								// Arquivada fecha a ENTRADA (docs/adr-002-billing.md): quem já está
+								// respondendo termina, quem não começou não começa.
+								archivedAt: true,
+								// O nível (CEFR) aparece na entrada — rótulo do professor, nunca gabarito.
+								level: true
 							}
 						}
 					}
@@ -66,6 +71,8 @@ export const playerRepo = {
 			where: { id: attemptId },
 			include: {
 				items: true,
+				// O avatar de quem está logado: o cabeçalho da questão mostra o dele.
+				account: { select: { avatar: true } },
 				publication: {
 					include: {
 						activityVersion: {
@@ -79,7 +86,8 @@ export const playerRepo = {
 										title: true,
 										sourceLang: true,
 										targetLang: true,
-										teacherId: true
+										teacherId: true,
+										archivedAt: true
 									}
 								}
 							}

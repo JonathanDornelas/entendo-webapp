@@ -1,6 +1,9 @@
 import type { LayoutServerLoad } from './$types';
 import { requireTeacher } from '$lib/server/auth/guard';
+import { programacoes } from '$lib/server/db/repos/programacoes';
 import { prisma } from '$lib/server/db/client';
+import { acessoDoProfessor, resumoDoAcesso } from '$lib/server/billing/acesso';
+import { ehCoordenacao } from '$lib/server/escola/guard';
 
 // Só carrega dado de exibição — a barreira de verdade já rodou em
 // hooks.server.ts antes deste load existir (auth.md: layout nunca é guarda).
@@ -15,18 +18,14 @@ export const load: LayoutServerLoad = async ({ locals }) => {
 		.map((part) => part[0]?.toUpperCase())
 		.join('');
 
-	// `trialing` é o estado de quem acabou de se cadastrar — dizer "Sem
-	// assinatura" para ele é errado, ele TEM acesso (billing.md "Trial
-	// provisório").
-	const emTrial = teacher.subscriptionStatus === 'trialing';
-	const planLabel =
-		teacher.subscriptionStatus === 'active'
-			? (teacher.plan ?? 'Assinatura ativa')
-			: emTrial
-				? 'Período de teste'
-				: teacher.subscriptionStatus === 'past_due'
-					? 'Pagamento atrasado'
-					: 'Sem assinatura';
+	// O card "Seu plano" da barra lateral: situação, uso do estoque e créditos.
+	// Sai do MESMO estado que decide os bloqueios (`acessoDoProfessor` →
+	// `can()`), nunca de uma comparação de status aqui (billing.md).
+	const [acesso, coordena] = await Promise.all([
+		acessoDoProfessor(teacher).then((estado) => resumoDoAcesso(estado)),
+		// Só para MOSTRAR a entrada "Escola" — a barreira é `requireCoordenacao`.
+		ehCoordenacao(teacher.id)
+	]);
 
 	// Badge de "Resultados": respostas de escrita esperando o retorno do
 	// professor. O critério é `reviewedAt` nulo, não `score: 0` — zero numa
@@ -43,16 +42,21 @@ export const load: LayoutServerLoad = async ({ locals }) => {
 		}
 	});
 
+	// Badge de "Módulos": turmas com um envio programado que não saiu.
+	const modulosComFalha = await programacoes(teacher).comFalha();
+
 	return {
 		teacher: {
 			initials: initials || '?',
 			name: teacher.name,
+			/** O avatar da conta (dezoito números, `$lib/avatar/`) — o ícone do professor no painel. */
+			avatar: teacher.avatar ?? null,
 			email: teacher.email,
-			plan: planLabel,
-			// Duração do trial ainda não definida (CLAUDE.md "Pendências"), então
-			// o card mostra o estado sem contagem de dias.
-			emTrial
+			plan: acesso.rotulo
 		},
-		aCorrigir
+		acesso,
+		coordena,
+		aCorrigir,
+		modulosComFalha
 	};
 };

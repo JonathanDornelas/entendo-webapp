@@ -11,6 +11,7 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import AmbientShapes from '$lib/components/AmbientShapes.svelte';
+	import Avatar from '$lib/components/Avatar.svelte';
 	import Logo from '$lib/components/Logo.svelte';
 	import VolumeControl from '$lib/components/VolumeControl.svelte';
 	import { som } from '$lib/client/sons.svelte';
@@ -45,13 +46,15 @@
 			skills: string[];
 			/** A atividade tem questão de fala — só então a autorização de gravação é perguntada. */
 			temFala: boolean;
+			/** O nível que o professor deu ("B1 · Intermediário"), ou nulo. */
+			nivel: string | null;
 		};
 		resumable: Resumable | null;
 		concluida: Concluida | null;
 		/** Preenchido quando o aluno chegou por um link pessoal. */
 		student: { name: string } | null;
 		/** A conta do aluno, se ele estiver logado. Oferta, nunca exigência. */
-		account: { name: string } | null;
+		account: { name: string; avatar: string | null } | null;
 	}
 
 	const MOCK: PageData = {
@@ -61,7 +64,8 @@
 			minutes: 10,
 			targetLabel: 'Inglês',
 			skills: ['Escuta', 'Fala', 'Escrita'],
-			temFala: true
+			temFala: true,
+			nivel: 'B1 · Intermediário'
 		},
 		resumable: null,
 		concluida: null,
@@ -86,17 +90,6 @@
 		Escuta: 'bg-accent',
 		Fala: 'bg-accent'
 	};
-
-	function iniciaisDe(nome: string): string {
-		return (
-			nome
-				.split(/\s+/)
-				.filter(Boolean)
-				.slice(0, 2)
-				.map((parte) => parte[0]?.toUpperCase())
-				.join('') || '?'
-		);
-	}
 </script>
 
 <svelte:head><title>{data.activity.title} — entendo</title></svelte:head>
@@ -115,10 +108,12 @@
 			class="flex items-center gap-2 rounded-full py-1 pe-2 text-[12.5px] whitespace-nowrap text-base-content/65 no-underline transition-colors hover:text-primary"
 			title="Abrir minhas atividades"
 		>
-			<span
-				class="grid size-[26px] place-items-center rounded-full bg-base-300 text-[10.5px] font-bold text-primary"
-				>{iniciaisDe(data.account.name)}</span
-			>
+			<Avatar
+				codigo={data.account.avatar}
+				nome={data.account.name}
+				size={26}
+				radius="rounded-full"
+			/>
 			<span class="hidden sm:inline">{data.account.name}</span>
 		</a>
 	{:else}
@@ -239,6 +234,10 @@
 					<span>uns {data.activity.minutes} minutos</span>
 					<span class="text-base-content/40" aria-hidden="true">•</span>
 					<span>{data.activity.targetLabel}</span>
+					{#if data.activity.nivel}
+						<span class="text-base-content/40" aria-hidden="true">•</span>
+						<span>{data.activity.nivel}</span>
+					{/if}
 				</p>
 				<h1 class="mb-2.5 font-display text-display font-semibold tracking-[-0.025em] text-pretty">
 					{data.activity.title}

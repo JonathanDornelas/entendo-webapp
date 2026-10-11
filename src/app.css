@@ -17,6 +17,10 @@
 	--color-base-content: #1a1730;
 	--color-line: #e2def2; /* borda de card/divisor — não confundir com base-300 (fill) */
 	--color-card: #ffffff; /* superfície de cartão; no escuro fica acima do base-100 */
+	/* O véu atrás de modal, painel lateral e gaveta: PRETO translúcido, o mesmo
+	   nos dois temas. Era `base-content/40`, que no escuro é um véu BRANCO — a
+	   página clareava em vez de recuar. Definido só aqui, de propósito. */
+	--color-overlay: rgb(0 0 0 / 0.55);
 
 	--color-primary: #5a3ff3;
 	--color-primary-content: #ffffff;
@@ -59,6 +63,10 @@
 	--font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
 	--font-content: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
 	--font-mono: 'JetBrains Mono', ui-monospace, monospace;
+	/* Um quarto papel, e DECORATIVO: só os rótulos do mapa do módulo do aluno
+	   ("MUNDO 1", "FASE 3"), sempre `aria-hidden` e ao lado do texto de verdade.
+	   Nunca corpo de texto, nunca conteúdo do idioma alvo (design-system.md). */
+	--font-pixel: 'Silkscreen', ui-monospace, monospace;
 
 	/* -------------------------------------------------------------------
 	   Escala FLUIDA — o tamanho acompanha a proporção da tela, não um px
@@ -599,6 +607,22 @@
 }
 
 /* ---------------------------------------------------------------------------
+   Página do Studio — UMA medida para todas as telas do painel.
+   Ocupa a largura INTEIRA do <main> (nada de max-w + mx-auto na página): cada
+   tela tinha a sua — 820px na conta, 900 no módulo, 1000 na lista de módulos —
+   e trocar de aba fazia o conteúdo pular de lugar. O que limita leitura é a
+   medida do PARÁGRAFO (max-w-[60ch]), nunca a da página.
+--------------------------------------------------------------------------- */
+@utility pagina-studio {
+	width: 100%;
+	min-width: 0;
+	padding: 1.25rem 1rem 1.75rem;
+	@media (width >= 64rem) {
+		padding: 1.75rem 1.75rem 2.25rem;
+	}
+}
+
+/* ---------------------------------------------------------------------------
    Movimento — só transform e opacity. Nenhuma dependência JS no Player.
 --------------------------------------------------------------------------- */
 @utility motion-tap {
@@ -656,6 +680,48 @@
 	}
 	to {
 		transform: scaleX(1);
+	}
+}
+
+/* O véu e o modal NATIVO (`<dialog>`, o editor de avatar): o Svelte não anima
+   o `::backdrop`, então entrada e saída dele são keyframes. Os painéis e
+   gavetas usam `$lib/client/transicoes.ts`, com as mesmas durações. */
+@keyframes en-veu {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@keyframes en-veu-out {
+	from {
+		opacity: 1;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+@keyframes en-modal-out {
+	from {
+		opacity: 1;
+		transform: none;
+	}
+	to {
+		opacity: 0;
+		transform: translate3d(0, 12px, 0) scale(0.98);
+	}
+}
+
+/* A barra de um gráfico de colunas crescendo da base (o início do Studio). */
+@keyframes en-grow-y {
+	from {
+		transform: scaleY(0);
+	}
+	to {
+		transform: scaleY(1);
 	}
 }
 
@@ -1011,6 +1077,47 @@
 		transform: translate3d(0, 100%, 0);
 	}
 }
+/* O mapa do módulo (MapaDoModulo.svelte), no tema 8 bits: as três rodam UMA
+   vez, em passos (`steps()`) em vez de curva — é o que faz parecer jogo antigo.
+   - lit: o halo da fase recém-liberada acende e some;
+   - pop: o confete do módulo concluído (deslocamento em --dx/--dy);
+   - sheet: a folha da fase sobe de baixo, no celular. */
+@keyframes en-lit {
+	0% {
+		opacity: 0;
+		transform: scale(0.7);
+	}
+	40% {
+		opacity: 1;
+		transform: scale(1.12);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.35);
+	}
+}
+@keyframes en-pop {
+	0% {
+		opacity: 0;
+		transform: translate3d(0, 0, 0) scale(0.4);
+	}
+	25% {
+		opacity: 1;
+	}
+	100% {
+		opacity: 0;
+		transform: translate3d(var(--dx), var(--dy), 0) scale(1);
+	}
+}
+@keyframes en-sheet {
+	from {
+		transform: translate3d(0, 100%, 0);
+	}
+	to {
+		transform: none;
+	}
+}
+
 @utility teclado-in {
 	animation: en-teclado-in 300ms var(--ease-out-soft) both;
 }

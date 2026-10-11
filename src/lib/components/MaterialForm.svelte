@@ -11,6 +11,13 @@
 	// do lote, o rendimento do conjunto, o aviso de repetido e "o que o aluno
 	// vai ver".
 	import Loading from './Loading.svelte';
+	import IdiomaTag from './IdiomaTag.svelte';
+	import { IDIOMAS, idiomaDe } from '$lib/idiomas';
+	import { getProfile } from '$lib/kernel/language/profiles';
+	import { resolve } from '$app/paths';
+	import type { MotivoDoBloqueio } from '$lib/billing/motivos';
+	import type { ContentUnitKind } from '$lib/kernel/content/types';
+	import type { EstadoDaIa, RespostaDaGeracao } from '$lib/billing/ia';
 	import { tokenize } from '$lib/kernel/language/tokenize';
 	import { shuffleWithSeed } from '$lib/kernel/random';
 	import { previewRawLines, RAW_SEPARATORS } from '$lib/kernel/content/parse-raw';
@@ -35,10 +42,23 @@
 	 * O que as remote functions devolvem, nas três formas: erro, um material
 	 * (com `reused` dizendo se já existia) e o lote (com as contagens).
 	 */
+	/**
+	 * `motivo`: a porta fechou por PLANO (limite de materiais, teste encerrado) —
+	 * a tela oferece `/planos?motivo=` em vez de "tente de novo".
+	 * `foraDoLimite`: num lote, as linhas novas que não couberam no estoque.
+	 */
 	export type ResultadoMaterial =
-		| { ok: false; error: string }
+		| { ok: false; error: string; motivo?: MotivoDoBloqueio | null }
 		| { ok: true; reused?: boolean }
-		| { ok: true; added: number; reused: number; ignored: number };
+		| {
+				ok: true;
+				added: number;
+				reused: number;
+				ignored: number;
+				foraDoLimite?: number;
+				aviso?: string | null;
+				motivo?: MotivoDoBloqueio | null;
+		  };
 
 	let {
 		contexto,
@@ -54,7 +74,12 @@
 		salvando = false,
 		onfechar,
 		fecharRotulo,
-		fecharSoNoCelular = false
+		fecharSoNoCelular = false,
+		ia,
+		ongerarIa,
+		onaceitarIa,
+		idioma = $bindable(null),
+		idiomaPadrao = null
 	}: {
 		/** Muda o título, o rendimento e o rótulo de salvar — nunca os campos. */
 		contexto: 'biblioteca' | 'wizard';
@@ -78,10 +103,44 @@
 		fecharRotulo?: string;
 		/** No wizard o formulário é coluna fixa no desktop: o X só faz sentido no celular. */
 		fecharSoNoCelular?: boolean;
+		/** Estado da geração por IA. Sem ele, o modo IA fica travado. */
+		ia?: EstadoDaIa;
+		/** A PÁGINA chama a remote function — o componente não conhece nenhuma (Convenções). */
+		ongerarIa?: (pedido: {
+			kind: ContentUnitKind;
+			texto: string;
+			quantos: 5 | 10 | 20;
+		}) => Promise<RespostaDaGeracao>;
+		/** Grava as marcadas. Devolve se deu certo — aí a lista de propostas se esvazia. */
+		onaceitarIa?: (kind: ContentUnitKind, dados: Record<string, unknown>[]) => Promise<boolean>;
+		/**
+		 * BIBLIOTECA: a tag de idioma do material (`$lib/idiomas.ts`). Vale para a
+		 * prévia (tokenizar e direção), para os rótulos ("Frase em japonês") e para
+		 * a IA. No wizard não existe: o material é da atividade e fala o idioma dela.
+		 */
+		idioma?: string | null;
+		/** O idioma com que um material NOVO nasce na biblioteca — o que o professor mais usa. */
+		idiomaPadrao?: string | null;
 	} = $props();
 
 	const wiz = $derived(contexto === 'wizard');
 	const editing = $derived(editando !== null);
+
+	// No wizard, a língua do conteúdo é a da atividade (props); na biblioteca, a
+	// tag escolhida aqui. `und` (sem idioma) cai no segmentador raiz, e a prévia
+	// continua obedecendo à regra nº 5.
+	const escolhido = $derived(wiz ? null : idiomaDe(idioma));
+	const tagConteudo = $derived(wiz ? contentTag : (escolhido?.tag ?? 'und'));
+	const direcao = $derived<'ltr' | 'rtl'>(
+		wiz ? dir : escolhido ? getProfile(escolhido.tag).direction : 'ltr'
+	);
+	const rotuloDoIdioma = $derived(wiz ? targetLabel : escolhido?.rotulo);
+	/**
+	 * Material que já está em atividade tem o idioma DELA: trocar na biblioteca
+	 * etiquetaria uma frase de inglês como espanhol numa atividade de inglês. O
+	 * servidor recusa também; aqui a tela diz por quê.
+	 */
+	const idiomaTravado = $derived(editing && (editando?.usedIn ?? 0) > 0);
 
 	// ── campos ──────────────────────────────────────────────────────────────
 	let kind = $state<MaterialKind>('pair');
@@ -116,6 +175,7 @@
 	export function novo() {
 		limpar();
 		modo = 'um';
+		if (!wiz) idioma = idiomaPadrao ?? '';
 		primeiroCampo?.focus();
 	}
 
@@ -123,6 +183,7 @@
 	export function editar(m: MaterialRow) {
 		editando = m;
 		kind = m.kind;
+		if (!wiz) idioma = m.idioma ?? '';
 		modo = 'um';
 		alvo = m.target;
 		traducao = m.source;
@@ -206,7 +267,7 @@
 				return {
 					warn: false,
 					title: `${plural(r.frases, 'frase', 'frases')} ${onde}`,
-					body: 'Cada frase rende 3 exercícios: montar, traduzir e completar a lacuna. Com escuta e fala configuradas, mais ouvir, escrever e dizer.'
+					body: 'Cada frase rende 3 exercícios — montar, traduzir e completar a lacuna —, e mais ouvir e falar quando há áudio.'
 				};
 			case 'vocab': {
 				const falta = wiz && r.termos < MINIMO_PARA_DISTRATOR;
@@ -266,20 +327,86 @@
 		}
 	}
 
-	// ── gerar com IA — só o front; o "Gerar" espera o provedor ─────────────
+	// ── gerar com IA ── A página pede ao servidor (`ia.remote.ts`), que debita os
+	// créditos, chama o provedor e devolve as propostas já validadas. Nada entra
+	// na biblioteca antes de o professor marcar e confirmar (paginas.md "Studio").
 	type Fonte = 'prompt' | 'imagem' | 'video';
 	let fonte = $state<Fonte>('prompt');
 	let promptIa = $state('');
-	let quantos = $state(10);
+	let quantos = $state<5 | 10 | 20>(10);
 	interface Proposta {
+		id: string;
 		esq: string;
 		dir: string;
 		reused: boolean;
 		on: boolean;
+		dados: Record<string, unknown>;
 	}
-	// Fica vazio até existir backend; a lista abaixo já sabe desenhar o que
-	// vier — marcar, desmarcar, "você já tem".
 	let propostas = $state<Proposta[]>([]);
+	let gerandoIa = $state(false);
+	let aceitandoIa = $state(false);
+	let erroIa = $state<{ texto: string; motivo: MotivoDoBloqueio | null } | null>(null);
+	/** O saldo depois da última geração; antes dela, o que a página mandou. */
+	let saldoIa = $state<number | null>(null);
+	const saldoAgora = $derived(saldoIa ?? ia?.saldo ?? 0);
+	const custoDaGeracao = $derived(quantos * (ia?.custoPorProposta ?? 1));
+	const podeGerar = $derived(
+		!!ia?.configurada &&
+			!!ia.pode &&
+			!!ongerarIa &&
+			fonte === 'prompt' &&
+			promptIa.trim().length >= 3 &&
+			saldoAgora >= custoDaGeracao &&
+			!gerandoIa
+	);
+
+	async function gerarComIa() {
+		if (!podeGerar || !ongerarIa) return;
+		gerandoIa = true;
+		erroIa = null;
+		try {
+			const r = await ongerarIa({ kind: KIND_TO_KERNEL[kind], texto: promptIa, quantos });
+			if (!r.ok) {
+				erroIa = { texto: r.error, motivo: r.motivo ?? null };
+				return;
+			}
+			saldoIa = r.saldo;
+			// O que ele já tem nasce DESMARCADO: reaproveitar é o padrão do servidor,
+			// mas marcar de novo o que já está na biblioteca não acrescenta nada.
+			propostas = r.propostas.map((pr) => ({
+				id: pr.id,
+				esq: pr.resumo.esq,
+				dir: pr.resumo.dir,
+				reused: pr.reused,
+				on: !pr.reused,
+				dados: pr.dados
+			}));
+			if (r.propostas.length === 0) {
+				erroIa = {
+					texto: 'A IA não devolveu nenhuma proposta que servisse. Os créditos voltaram.',
+					motivo: null
+				};
+			}
+		} catch {
+			erroIa = { texto: 'Não deu para gerar agora. Tente de novo em instantes.', motivo: null };
+		} finally {
+			gerandoIa = false;
+		}
+	}
+
+	async function aceitarPropostas() {
+		if (!onaceitarIa || nMarcadas === 0) return;
+		aceitandoIa = true;
+		try {
+			const ok = await onaceitarIa(
+				KIND_TO_KERNEL[kind],
+				propostas.filter((pr) => pr.on).map((pr) => pr.dados)
+			);
+			if (ok) propostas = [];
+		} finally {
+			aceitandoIa = false;
+		}
+	}
 	const nMarcadas = $derived(propostas.filter((p) => p.on).length);
 	const nJaTem = $derived(propostas.filter((p) => p.on && p.reused).length);
 	const FONTES: { id: Fonte; label: string; hint: string; icon: string }[] = [
@@ -340,7 +467,7 @@
 				const frase = alvo.trim() || EXEMPLO.pair.alvo;
 				// Regra inviolável nº 5: nunca `split(' ')`. O segmentador do idioma
 				// alvo é o que separa palavra em japonês e em tailandês.
-				const tokens = tokenize(frase, { tag: contentTag });
+				const tokens = tokenize(frase, { tag: tagConteudo });
 				return {
 					kind: 'Montar a frase',
 					note: '1 dos 3 exercícios desta frase',
@@ -431,7 +558,7 @@
 			case 'lista':
 				return loteOk > 0;
 			case 'ia':
-				return nMarcadas > 0;
+				return nMarcadas > 0 && !aceitandoIa && !!onaceitarIa;
 			default:
 				return kind === 'text'
 					? alvo.trim().length > 0 && raw.trim().length > 0
@@ -463,11 +590,11 @@
 
 	const rotuloAlvo = $derived(
 		kind === 'pair'
-			? targetLabel
-				? `Frase em ${targetLabel.toLocaleLowerCase('pt-BR')}`
+			? rotuloDoIdioma
+				? `Frase em ${rotuloDoIdioma.toLocaleLowerCase('pt-BR')}`
 				: 'Frase no idioma alvo'
-			: targetLabel
-				? `Termo em ${targetLabel.toLocaleLowerCase('pt-BR')}`
+			: rotuloDoIdioma
+				? `Termo em ${rotuloDoIdioma.toLocaleLowerCase('pt-BR')}`
 				: 'Termo no idioma alvo'
 	);
 	const rotuloTraducao = $derived(
@@ -527,12 +654,44 @@
 
 	<!-- corpo -->
 	<div class="min-h-0 flex-1 overflow-y-auto px-4 py-5 lg:px-[22px]">
+		{#if !wiz}
+			<!-- idioma: a tag do material na biblioteca. No wizard ele é o da atividade. -->
+			<div class="mb-[18px] flex flex-wrap items-center gap-x-3 gap-y-2">
+				<label
+					for="material-idioma"
+					class="text-[11px] font-bold tracking-[0.09em] text-base-content/65 uppercase"
+					>Idioma</label
+				>
+				{#if idiomaTravado}
+					<input type="hidden" name="idioma" value={idioma ?? ''} />
+					<IdiomaTag tag={idioma} />
+					<span class="text-[12px] text-base-content/65"
+						>travado: está em {editando?.usedIn}
+						{editando?.usedIn === 1 ? 'atividade' : 'atividades'} desse idioma</span
+					>
+				{:else}
+					<select
+						id="material-idioma"
+						name="idioma"
+						bind:value={idioma}
+						class="select h-[38px] min-h-[38px] w-auto py-0 text-[13px]"
+					>
+						<option value="">Sem idioma</option>
+						{#each IDIOMAS as i (i.tag)}
+							<option value={i.tag}>{i.rotulo}</option>
+						{/each}
+					</select>
+					<span class="text-[12px] text-base-content/65">a língua que o aluno vai aprender</span>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- tipo: cartões que dizem o que o aluno faz -->
 		<p class="mb-2.5 text-[11px] font-bold tracking-[0.09em] text-base-content/65 uppercase">
 			{editing ? 'Tipo · travado' : 'O que você quer que o aluno faça'}
 		</p>
 		<input type="hidden" name="kind" value={kernelKind} />
-		<div class="mb-2 grid gap-2 sm:grid-cols-2">
+		<div class="mb-2.5 grid gap-2 sm:grid-cols-2">
 			{#each TIPOS as t (t.id)}
 				{@const sel = t.id === kind}
 				{@const locked = editing && !sel}
@@ -569,25 +728,25 @@
 				</button>
 			{/each}
 		</div>
-		<p class="mb-[18px] text-[12px] leading-normal text-base-content/65">
-			{editing
-				? 'Para usar outro tipo, crie um material novo.'
-				: 'Escolha pelo exercício que você quer, não pelo formato do arquivo.'}
-		</p>
+		<!-- A dica "escolha pelo exercício, não pelo arquivo" repetia o título dos
+		     cartões; sobrou só a da edição, que diz algo novo. -->
+		{#if editing}
+			<p class="mb-2.5 text-[12px] leading-normal text-base-content/65">
+				Para usar outro tipo, crie um material novo.
+			</p>
+		{/if}
 
-		<!-- rendimento: o que o conjunto já dá para gerar -->
-		<div
-			class="mb-[18px] flex gap-2.5 rounded-box border p-3.5 {yieldInfo.warn
-				? 'border-warning/35 bg-warning/6'
-				: 'border-line bg-base-200'}"
-		>
-			<svg
-				class="mt-px size-[17px] shrink-0 {yieldInfo.warn ? 'text-warning' : 'text-success'}"
-				viewBox="0 0 24 24"
-				fill="none"
-				aria-hidden="true"
-			>
-				{#if yieldInfo.warn}
+		<!-- rendimento: o que o conjunto já dá para gerar. Uma linha neutra quando
+		     está tudo certo; caixa de aviso só quando falta algo — é aí que ele pede
+		     ação. (O verde do ícone antigo é a cor da correção.) -->
+		{#if yieldInfo.warn}
+			<div class="mb-[18px] flex gap-2.5 rounded-box border border-warning/35 bg-warning/6 p-3.5">
+				<svg
+					class="mt-px size-[17px] shrink-0 text-warning"
+					viewBox="0 0 24 24"
+					fill="none"
+					aria-hidden="true"
+				>
 					<path
 						d="M12 4.5l8 14.5H4z"
 						stroke="currentColor"
@@ -600,30 +759,20 @@
 						stroke-width="2"
 						stroke-linecap="round"
 					/>
-				{:else}
-					<path
-						d="M12 20.5a8.5 8.5 0 100-17 8.5 8.5 0 000 17z"
-						stroke="currentColor"
-						stroke-width="2"
-					/>
-					<path
-						d="M8.5 12.2l2.4 2.4 4.6-4.9"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					/>
-				{/if}
-			</svg>
-			<div class="min-w-0">
-				<p class="mb-0.5 text-[13px] font-bold {yieldInfo.warn ? 'text-warning' : ''}">
-					{yieldInfo.title}
-				</p>
-				<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
-					{yieldInfo.body}
-				</p>
+				</svg>
+				<div class="min-w-0">
+					<p class="mb-0.5 text-[13px] font-bold text-warning">{yieldInfo.title}</p>
+					<p class="text-[12.5px] leading-normal text-pretty text-base-content/65">
+						{yieldInfo.body}
+					</p>
+				</div>
 			</div>
-		</div>
+		{:else}
+			<p class="mb-[18px] text-[12.5px] leading-normal text-pretty text-base-content/65">
+				<strong class="font-semibold text-base-content">{yieldInfo.title}.</strong>
+				{yieldInfo.body}
+			</p>
+		{/if}
 
 		<!-- modo de entrada -->
 		{#if !editing}
@@ -728,8 +877,8 @@
 							name="target"
 							bind:value={alvo}
 							bind:this={primeiroCampo}
-							{dir}
-							data-content-lang={contentTag}
+							dir={direcao}
+							data-content-lang={tagConteudo}
 							class="input w-full font-content text-[15px]"
 							placeholder={kind === 'pair' ? EXEMPLO.pair.alvo : EXEMPLO.vocab.alvo}
 						/>
@@ -812,8 +961,8 @@
 								id="mf-exemplo"
 								name="example"
 								bind:value={exemplo}
-								{dir}
-								data-content-lang={contentTag}
+								dir={direcao}
+								data-content-lang={tagConteudo}
 								class="input w-full bg-base-200 font-content text-[14px]"
 								placeholder="I have breakfast at seven."
 							/>
@@ -840,8 +989,8 @@
 							name="raw"
 							bind:value={raw}
 							rows="5"
-							{dir}
-							data-content-lang={contentTag}
+							dir={direcao}
+							data-content-lang={tagConteudo}
 							class="textarea w-full font-content text-[14.5px] leading-[1.65]"
 							placeholder="Cole o trecho que você usa em aula"></textarea>
 					</div>
@@ -865,16 +1014,16 @@
 									<div class="grid min-w-0 flex-1 gap-1.5 sm:grid-cols-2">
 										<input
 											bind:value={pergunta.question}
-											{dir}
-											data-content-lang={contentTag}
+											dir={direcao}
+											data-content-lang={tagConteudo}
 											class="input min-w-0 font-content text-[13.5px]"
 											placeholder="Pergunta"
 											aria-label="Pergunta {i + 1}"
 										/>
 										<input
 											bind:value={pergunta.answer}
-											{dir}
-											data-content-lang={contentTag}
+											dir={direcao}
+											data-content-lang={tagConteudo}
 											class="input min-w-0 font-content text-[13.5px]"
 											placeholder="Resposta certa"
 											aria-label="Resposta da pergunta {i + 1}"
@@ -936,8 +1085,8 @@
 									/>
 									<input
 										bind:value={fala.text}
-										{dir}
-										data-content-lang={contentTag}
+										dir={direcao}
+										data-content-lang={tagConteudo}
 										class="input min-w-0 flex-1 font-content text-[14px]"
 										placeholder="O que essa pessoa diz"
 										aria-label="Fala {i + 1}"
@@ -1028,8 +1177,8 @@
 					bind:value={lote}
 					bind:this={textareaLote}
 					rows="6"
-					{dir}
-					data-content-lang={contentTag}
+					dir={direcao}
+					data-content-lang={tagConteudo}
 					class="textarea w-full font-content text-[14px] leading-[1.7]"
 					placeholder={kind === 'vocab'
 						? `${EXEMPLO.vocab.alvo} · ${EXEMPLO.vocab.trad}`
@@ -1092,8 +1241,8 @@
 									<span class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2.5 gap-y-1">
 										<span
 											class="font-content text-[13.5px] font-semibold"
-											{dir}
-											data-content-lang={contentTag}>{l.left}</span
+											dir={direcao}
+											data-content-lang={tagConteudo}>{l.left}</span
 										>
 										<span class="text-[12.5px] text-base-content/65">{l.right}</span>
 									</span>
@@ -1170,6 +1319,11 @@
 					<label for="mf-prompt" class="mb-1.5 block text-[12.5px] font-bold"
 						>O que você quer treinar</label
 					>
+					{#if ia?.idiomas}
+						<!-- A biblioteca não tem idioma: dizer em qual a IA vai escrever evita
+						     gastar crédito com propostas no idioma errado. -->
+						<p class="-mt-1 mb-1.5 text-[12px] text-base-content/65">{ia.idiomas}</p>
+					{/if}
 					<textarea
 						id="mf-prompt"
 						bind:value={promptIa}
@@ -1268,7 +1422,7 @@
 						role="group"
 						aria-label="Quantas propostas"
 					>
-						{#each [5, 10, 20] as n (n)}
+						{#each [5, 10, 20] as const as n (n)}
 							<button
 								type="button"
 								onclick={() => (quantos = n)}
@@ -1285,27 +1439,64 @@
 					>
 				</div>
 
-				<!-- O botão existe e o resto da tela também; o que falta é o provedor.
-				     Travado até ele existir — CLAUDE.md "Pendências". -->
 				<button
 					type="button"
-					disabled
+					onclick={gerarComIa}
+					disabled={!podeGerar}
 					class="mt-3.5 btn h-12 w-full gap-2 btn-primary text-[14.5px]"
-					title="A geração por IA ainda não está ligada"
 				>
-					<svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-						<path
-							d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"
-							stroke="currentColor"
-							stroke-width="1.8"
-							stroke-linejoin="round"
-						/>
-					</svg>
-					Gerar {quantos} propostas
+					{#if gerandoIa}
+						<Loading variant="fila" size={12} tone="current" label="Gerando propostas" />
+						Gerando…
+					{:else}
+						<svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<path
+								d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linejoin="round"
+							/>
+						</svg>
+						Gerar {quantos} propostas · {custoDaGeracao} créditos
+					{/if}
 				</button>
+				<!-- Botão travado SEMPRE diz por quê (paginas.md): um botão cinza sem
+				     explicação faz o professor achar que a tela quebrou. -->
 				<p class="mt-2 text-center text-[12px] text-base-content/65">
-					Em breve — a geração por IA ainda não está ligada.
+					{#if !ia?.configurada}
+						A geração por IA ainda não está ligada neste servidor.
+					{:else if !ia.pode}
+						{ia.motivo === 'ia'
+							? 'Gerar com IA é dos planos Pro e Super.'
+							: ia.motivo === 'creditos'
+								? 'Os créditos de IA deste ciclo acabaram.'
+								: 'Seu plano não permite gerar agora.'}
+						{#if ia.motivo}
+							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+							<a href={resolve('/(site)/planos') + '?motivo=' + ia.motivo} class="font-bold"
+								>Ver os planos</a
+							>
+						{/if}
+					{:else if fonte !== 'prompt'}
+						Imagem e vídeo chegam depois — por enquanto, descreva o que quer no prompt.
+					{:else if saldoAgora < custoDaGeracao}
+						Saldo de {saldoAgora} créditos: escolha menos propostas.
+					{:else}
+						Saldo: {saldoAgora} créditos. Cada proposta custa {ia.custoPorProposta}; a que não
+						servir é devolvida.
+					{/if}
 				</p>
+				{#if erroIa}
+					<p class="mt-2 text-center text-[12.5px] font-semibold text-error" role="alert">
+						{erroIa.texto}
+						{#if erroIa.motivo}
+							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+							<a href={resolve('/(site)/planos') + '?motivo=' + erroIa.motivo} class="font-bold"
+								>Ver os planos</a
+							>
+						{/if}
+					</p>
+				{/if}
 
 				{#if propostas.length > 0}
 					<div class="mt-4 overflow-hidden rounded-box border border-line">
@@ -1324,7 +1515,7 @@
 								{nMarcadas === propostas.length ? 'Desmarcar todas' : 'Marcar todas'}
 							</button>
 						</div>
-						{#each propostas as p, i (i)}
+						{#each propostas as p (p.id)}
 							<div
 								class="flex items-stretch gap-1.5 border-b border-line pe-2.5 {p.on
 									? ''
@@ -1356,8 +1547,8 @@
 									<span class="min-w-0 flex-1">
 										<span
 											class="mb-0.5 block font-content text-[13.5px] font-semibold"
-											{dir}
-											data-content-lang={contentTag}>{p.esq}</span
+											dir={direcao}
+											data-content-lang={tagConteudo}>{p.esq}</span
 										>
 										<span class="block text-[12.5px] text-base-content/65">{p.dir}</span>
 									</span>
@@ -1394,7 +1585,16 @@
 						stroke-linecap="round"
 					/>
 				</svg>
-				{resultado.error}
+				<span>
+					{resultado.error}
+					{#if resultado.motivo}
+						<!-- Porta fechada por plano tem saída, e ela não é "tente de novo". -->
+						<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+						<a href={resolve('/(site)/planos') + '?motivo=' + resultado.motivo} class="font-bold"
+							>Ver os planos</a
+						>
+					{/if}
+				</span>
 			</p>
 		{:else if resultado?.ok && 'ignored' in resultado}
 			<!-- Quantas linhas ficaram de fora é a informação que faltava: colar uma
@@ -1422,6 +1622,24 @@
 					? `, ${resultado.ignored} sem separador ${resultado.ignored === 1 ? 'ignorada' : 'ignoradas'}`
 					: ''}{resultado.reused ? `, ${resultado.reused} você já tinha` : ''}.
 			</p>
+			{#if resultado.aviso}
+				<!-- As linhas que não couberam no estoque do plano: dizer QUANTAS, e o
+				     caminho, em vez de deixar o contador subir menos sem explicação. -->
+				<p
+					class="mt-2 flex items-center gap-2 rounded-field border-s-[3px] border-warning bg-base-200 px-3 py-2.5 text-[13px]"
+					role="status"
+				>
+					<span>
+						{resultado.aviso}
+						{#if resultado.motivo}
+							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+							<a href={resolve('/(site)/planos') + '?motivo=' + resultado.motivo} class="font-bold"
+								>Ver os planos</a
+							>
+						{/if}
+					</span>
+				</p>
+			{/if}
 		{:else if resultado?.ok && resultado.reused === true}
 			<!-- Reaproveitar em silêncio parecia falha: o contador não subia e o
 			     professor reenviava a mesma frase. -->
@@ -1463,7 +1681,7 @@
 				<div class="px-4 py-[15px]">
 					<p class="mb-2.5 text-[13px] text-base-content/65">{previa.prompt}</p>
 					{#if kind === 'pair'}
-						<div class="flex flex-wrap gap-1.5" {dir} data-content-lang={contentTag}>
+						<div class="flex flex-wrap gap-1.5" dir={direcao} data-content-lang={tagConteudo}>
 							{#each previa.chips as c, i (i)}
 								<span
 									class="rounded-field border border-line bg-base-200 px-3 py-2 font-content text-[14px]"
@@ -1472,7 +1690,7 @@
 							{/each}
 						</div>
 					{:else if kind === 'dialogue'}
-						<div class="grid gap-1.5" {dir} data-content-lang={contentTag}>
+						<div class="grid gap-1.5" dir={direcao} data-content-lang={tagConteudo}>
 							{#each previa.falas as f, i (i)}
 								<span
 									class="flex items-center gap-2.5 rounded-field border border-line bg-base-200 px-3 py-2.5"
@@ -1534,10 +1752,11 @@
 		{/if}
 		<button
 			type={modoEfetivo === 'ia' ? 'button' : 'submit'}
+			onclick={modoEfetivo === 'ia' ? aceitarPropostas : undefined}
 			disabled={!podeSalvar}
 			class="btn h-[46px] flex-1 motion-tap gap-2.5 btn-primary text-[14.5px] lg:flex-none lg:px-5"
 		>
-			{#if salvando}
+			{#if salvando || aceitandoIa}
 				<Loading variant="fila" size={12} tone="current" label="Salvando" />
 				Salvando…
 			{:else}

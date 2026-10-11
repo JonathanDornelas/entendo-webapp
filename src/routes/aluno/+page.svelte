@@ -20,8 +20,28 @@
 	import HeaderCard from '$lib/components/HeaderCard.svelte';
 	import Logo from '$lib/components/Logo.svelte';
 	import ScoreBar from '$lib/components/ScoreBar.svelte';
-	import { CODIGO_PADRAO, sortearCodigo } from '$lib/avatar/montar';
+	import { CODIGO_PADRAO, avatarPadrao, sortearCodigo } from '$lib/avatar/montar';
 	import { adotarMinhasTentativas, gravarMeuAvatar } from './aluno.remote';
+	import { resumoDoMapa, type EstadoDaFase, type MapaDoModulo } from '$lib/modulos/mapa';
+	import { ICONE_PIXEL } from '$lib/modulos/pixel';
+
+	/** A trilha curta do cartão de módulo: ícone por estado, nunca só cor. */
+	const TRILHA: Record<EstadoDaFase, { classe: string; icone: string }> = {
+		done: { classe: 'bg-primary text-primary-content', icone: ICONE_PIXEL.bandeira },
+		doing: {
+			classe: 'bg-base-100 text-primary shadow-[inset_0_0_0_2px_var(--color-primary)]',
+			icone: ICONE_PIXEL.jogar
+		},
+		open: {
+			classe: 'bg-base-100 text-primary shadow-[inset_0_0_0_2px_var(--color-primary)]',
+			icone: ICONE_PIXEL.jogar
+		},
+		locked: { classe: 'bg-base-300 text-base-content/65', icone: ICONE_PIXEL.cadeado },
+		closed: {
+			classe: 'bg-base-200 text-base-content/65 shadow-[inset_0_0_0_1.5px_var(--color-line)]',
+			icone: ICONE_PIXEL.xis
+		}
+	};
 
 	interface Tentativa {
 		id: string;
@@ -61,6 +81,8 @@
 			semanasSeguidas: number;
 		};
 		habilidades: Habilidade[];
+		/** Os mapas de módulo das turmas desta conta (docs/telas-modulos-aluno.md). */
+		modulos: MapaDoModulo[];
 	}
 
 	let { data }: { data: PageData } = $props();
@@ -92,18 +114,23 @@
 	// fechar sem usar deixava a tela mostrando um avatar que não foi gravado.
 	const avatarNaTela = $derived(editorAberto ? codigo : (data.account.avatar ?? null));
 
+	/** Falha ao gravar é DITA: o avatar da tela voltaria ao antigo sem explicação. */
+	let erroAvatar = $state<string | null>(null);
 	async function usarAvatar(escolhido: string) {
 		salvandoAvatar = true;
+		erroAvatar = null;
 		try {
 			await gravarMeuAvatar(escolhido);
 			await invalidateAll();
+		} catch {
+			erroAvatar = 'Não deu para gravar o avatar agora. Tente de novo em instantes.';
 		} finally {
 			salvandoAvatar = false;
 		}
 	}
 
 	function abrirEditor() {
-		codigo = data.account.avatar ?? sortearCodigo();
+		codigo = data.account.avatar ?? avatarPadrao(data.account.name);
 		editorAberto = true;
 	}
 
@@ -115,11 +142,15 @@
 
 	// ── adotar as tentativas soltas ──
 	let adotando = $state(false);
+	let erroAdotar = $state<string | null>(null);
 	async function adotar() {
 		adotando = true;
+		erroAdotar = null;
 		try {
 			await adotarMinhasTentativas();
 			await invalidateAll();
+		} catch {
+			erroAdotar = 'Não deu para trazer as respostas agora. Tente de novo em instantes.';
 		} finally {
 			adotando = false;
 		}
@@ -296,6 +327,9 @@
 						{data.soltas === 1 ? 'Adotar minha tentativa' : 'Adotar minhas tentativas'}
 					{/if}
 				</button>
+				{#if erroAdotar}
+					<p class="w-full text-[13px] font-semibold text-error" role="alert">{erroAdotar}</p>
+				{/if}
 			</div>
 		{/if}
 
@@ -345,6 +379,9 @@
 						{/if}
 					</button>
 				</div>
+				{#if erroAvatar}
+					<p class="w-full text-[13px] font-semibold text-error" role="alert">{erroAvatar}</p>
+				{/if}
 			</div>
 		</section>
 
@@ -385,6 +422,80 @@
 				</p>
 			{/if}
 		</section>
+
+		<!-- ═══ 4.5 seus módulos ═══ Só aparece quando há algum: conta nova não
+		     mostra caixa vazia. O cartão abre o mapa (docs/telas-modulos-aluno.md 1). -->
+		{#if data.modulos.length > 0}
+			<section class="mb-[26px]">
+				<div class="mb-3.5 flex flex-wrap items-baseline gap-x-3.5 gap-y-2.5">
+					<h2 class="font-display text-lg font-semibold lg:text-xl">Seus módulos</h2>
+					<span class="text-[13px] text-base-content/65">o caminho de cada um, fase por fase</span>
+				</div>
+				<ul class="grid list-none grid-cols-1 gap-[11px] p-0 lg:grid-cols-2">
+					{#each data.modulos as m (m.id)}
+						{@const r = resumoDoMapa(m.fases)}
+						<li class="min-w-0">
+							<a
+								href={resolve('/aluno/modulos/[id]', { id: m.id })}
+								class="block min-w-0 rounded-[14px] border border-line px-[17px] py-4 text-base-content no-underline transition-[transform,border-color,background-color] duration-200 hover:-translate-y-0.5 hover:border-primary hover:bg-base-200"
+							>
+								<span class="mb-0.75 flex items-baseline gap-2.5">
+									<span class="min-w-0 flex-1 text-[15px] font-bold">{m.nome}</span>
+									<span class="flex-none text-[13px] font-bold"
+										>{r.concluidas} de {r.total} fases</span
+									>
+								</span>
+								<span class="mb-3 block text-[12.5px] text-base-content/65"
+									>{m.professor} · {m.turma}</span
+								>
+								<span class="mb-3 flex flex-wrap gap-1" aria-hidden="true">
+									{#each m.fases as f (f.id)}
+										<span
+											class="grid size-6 place-items-center [clip-path:polygon(3px_0,calc(100%-3px)_0,100%_3px,100%_calc(100%-3px),calc(100%-3px)_100%,3px_100%,0_calc(100%-3px),0_3px)] {TRILHA[
+												f.estado
+											].classe}"
+										>
+											<svg class="size-[11px]" viewBox="0 0 7 7" shape-rendering="crispEdges"
+												><path d={TRILHA[f.estado].icone} fill="currentColor" /></svg
+											>
+										</span>
+									{/each}
+								</span>
+								<span
+									class="flex items-center gap-2 text-[13px] {r.proxima.tipo === 'jogar'
+										? 'font-bold text-primary'
+										: 'text-base-content/65'}"
+								>
+									<svg
+										class="size-3.5 flex-none"
+										viewBox="0 0 7 7"
+										shape-rendering="crispEdges"
+										aria-hidden="true"
+										><path
+											d={r.proxima.tipo === 'jogar'
+												? ICONE_PIXEL.jogar
+												: r.proxima.tipo === 'fim'
+													? ICONE_PIXEL.bandeira
+													: ICONE_PIXEL.calendario}
+											fill="currentColor"
+										/></svg
+									>
+									{r.proxima.tipo === 'jogar'
+										? `${r.proxima.fase.estado === 'doing' ? 'Continuar' : 'Jogar'} ${r.proxima.fase.titulo}`
+										: r.proxima.tipo === 'fim'
+											? 'Módulo concluído'
+											: r.proxima.abre
+												? `${r.proxima.tipo === 'vazio' ? 'A primeira' : 'Em dia. A próxima'} abre ${r.proxima.abre}`
+												: r.proxima.tipo === 'vazio'
+													? 'A primeira fase chega pelo seu e-mail'
+													: 'Em dia. A próxima chega pelo seu e-mail'}
+								</span>
+							</a>
+						</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
 
 		<!-- ═══ 5. como você vem indo ═══ Só das atividades com resultado
 		     liberado — a conta não contorna o interruptor do professor. -->

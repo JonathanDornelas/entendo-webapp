@@ -4,11 +4,15 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/client/auth';
+	import { authAlunoClient } from '$lib/client/auth-aluno';
 
 	// Token inválido é ESTADO PRÓPRIO com caminho de volta — nunca um form que
 	// falha no submit. O token chega por query string (?token=...), anexado
-	// pelo Better Auth ao redirectTo passado em forgetPassword().
+	// pelo Better Auth ao `redirectTo` pedido em "esqueci a senha" — que traz
+	// `?como=aluno` quando a conta é de aluno: o token é da instância dele.
 	const token = $derived(page.url.searchParams.get('token'));
+	const aluno = $derived(page.url.searchParams.get('como') === 'aluno');
+	const modo = $derived(aluno ? '?como=aluno' : '');
 
 	let pw = $state('');
 	let confirm = $state('');
@@ -20,13 +24,17 @@
 		e.preventDefault();
 		if (!token) return;
 		loading = true;
-		const { error } = await authClient.resetPassword({ newPassword: pw, token });
+		const cliente = aluno ? authAlunoClient : authClient;
+		const { error } = await cliente.resetPassword({ newPassword: pw, token });
 		loading = false;
 		if (error) {
 			expired = true;
 			return;
 		}
-		await goto(resolve('/(auth)/entrar'));
+		// Redefinir não abre sessão: a tela de entrar diz que a senha nova vale.
+		const params = new URLSearchParams({ ...(aluno ? { como: 'aluno' } : {}), senha: 'nova' });
+		// eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do modo; a regra não enxerga a concatenação.
+		await goto(`${resolve('/(auth)/entrar')}?${params}`);
 	}
 </script>
 
@@ -54,12 +62,14 @@
 			<p class="mb-[18px] text-[13.5px] leading-relaxed text-base-content/65">
 				Este link já foi usado ou passou de 1 hora. Peça um novo para continuar.
 			</p>
+			<!-- eslint-disable svelte/no-navigation-without-resolve -- rota resolvida mais o modo (?como=aluno); a regra não enxerga a concatenação. -->
 			<a
-				href={resolve('/(auth)/esqueci-senha')}
+				href={resolve('/(auth)/esqueci-senha') + modo}
 				class="btn min-h-[46px] w-full motion-tap btn-outline font-bold no-underline"
 			>
 				Pedir novo link
 			</a>
+			<!-- eslint-enable svelte/no-navigation-without-resolve -->
 		</div>
 	{:else}
 		<h1 class="mb-[18px] font-display text-[22px] font-semibold tracking-[-0.02em]">Nova senha</h1>
@@ -109,7 +119,7 @@
 					<Loading variant="fila" size={13} tone="current" label="Salvando" />
 					Salvando…
 				{:else}
-					Salvar e entrar
+					Salvar senha nova
 				{/if}
 			</button>
 		</form>

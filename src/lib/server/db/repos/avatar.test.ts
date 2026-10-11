@@ -101,6 +101,38 @@ describe('avatar da conta', () => {
 		expect(linha?.avatar).toBe(segundo);
 	});
 
+	it('o perfil (idiomas que ensina) é da própria conta, e filtra tag que não é do produto', async () => {
+		const padrao = await contaProfessor(professorA).perfil();
+		expect(padrao).toMatchObject({ idiomas: [], idiomaDosAlunos: 'pt-BR' });
+
+		await contaProfessor(professorA).gravarPerfil({
+			name: 'Professora A',
+			idiomas: ['ja-JP', 'inventado', 'en-US', 'ja-JP'],
+			idiomaDosAlunos: 'xx'
+		});
+		const [a, b] = await Promise.all([
+			contaProfessor(professorA).perfil(),
+			contaProfessor(professorB).perfil()
+		]);
+		expect(a).toMatchObject({ idiomas: ['ja-JP', 'en-US'], idiomaDosAlunos: 'pt-BR' });
+		expect(b).toMatchObject({ idiomas: [], idiomaDosAlunos: 'pt-BR' });
+
+		expect(await contaProfessor(professorB).gravarIdiomas(['es-ES', 'zz'])).toEqual(['es-ES']);
+		expect((await contaProfessor(professorA).perfil()).idiomas).toEqual(['ja-JP', 'en-US']);
+
+		// O formulário manda na ordem da LISTA (es antes de ja); o primeiro de antes continua primeiro.
+		await contaProfessor(professorA).gravarPerfil({
+			name: 'Professora A',
+			idiomas: ['es-ES', 'en-US', 'ja-JP'],
+			idiomaDosAlunos: 'pt-BR'
+		});
+		expect((await contaProfessor(professorA).perfil()).idiomas).toEqual([
+			'ja-JP',
+			'en-US',
+			'es-ES'
+		]);
+	});
+
 	// O convite de adotar aparece a partir desta contagem. Contar errado ofereceria
 	// ao aluno respostas que não são dele — ou esconderia as que são.
 	it('tentativas soltas não conta as de outro aparelho', async () => {

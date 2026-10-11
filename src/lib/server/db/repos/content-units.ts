@@ -1,8 +1,9 @@
-import { prisma } from '$lib/server/db/client';
+import { prisma, type Db } from '$lib/server/db/client';
 import type { ContentUnitKind } from '$lib/kernel/content/types';
 import { parseContentUnit } from '$lib/kernel/content/parse';
 import type { StoredContentUnit } from '$lib/kernel/generators';
 import type { Prisma } from '../../../../../generated/prisma/client.ts';
+import { idiomaOuNulo } from '$lib/idiomas';
 
 /** Só o id importa para escopar — ver a nota em `activities.ts`. */
 type TeacherScope = { id: string };
@@ -13,17 +14,42 @@ type TeacherScope = { id: string };
  * Estende `StoredContentUnit` (o que os geradores consomem) em vez de
  * substituí-lo — o kernel não precisa saber de uso.
  */
-export type UsedContentUnit = StoredContentUnit & { usedIn: number };
+export type UsedContentUnit = StoredContentUnit & {
+	usedIn: number;
+	/** A tag de idioma do material (`$lib/idiomas.ts`); nula = sem idioma. */
+	targetLang: string | null;
+};
 
 /**
  * Biblioteca de materiais do professor — escopada por `teacherId`, como todo
  * repositório (auth.md "Isolamento entre professores"). O material adicionado
  * dentro de uma atividade também entra aqui e pode ser reusado em outra.
  */
-export function materiais(teacher: TeacherScope) {
+export function materiais(teacher: TeacherScope, db: Db = prisma) {
+	/** O idioma alvo de uma atividade DESTE professor (nulo se não for dele). */
+	async function idiomaDaAtividade(activityId: string): Promise<string | null> {
+		const a = await db.activity.findFirst({
+			where: { id: activityId, teacherId: teacher.id },
+			select: { targetLang: true }
+		});
+		return idiomaOuNulo(a?.targetLang);
+	}
+
+	/**
+	 * Dá idioma a quem não tem — e SÓ a quem não tem. Material que já tem tag
+	 * não troca por ter sido reaproveitado: a tag dele foi escolha de alguém.
+	 */
+	async function preencherIdioma(contentId: string, idioma: string | null): Promise<void> {
+		if (!idioma) return;
+		await db.contentUnit.updateMany({
+			where: { id: contentId, teacherId: teacher.id, targetLang: null },
+			data: { targetLang: idioma }
+		});
+	}
+
 	return {
 		list(): Promise<UsedContentUnit[]> {
-			return prisma.contentUnit
+			return db.contentUnit
 				.findMany({
 					where: { teacherId: teacher.id },
 					orderBy: { createdAt: 'desc' },
@@ -34,13 +60,14 @@ export function materiais(teacher: TeacherScope) {
 						id: row.id,
 						kind: row.kind as ContentUnitKind,
 						data: row.data,
-						usedIn: row._count.activities
+						usedIn: row._count.activities,
+						targetLang: idiomaOuNulo(row.targetLang)
 					}))
 				);
 		},
 
 		byIds(ids: string[]): Promise<StoredContentUnit[]> {
-			return prisma.contentUnit
+			return db.contentUnit
 				.findMany({
 					where: { id: { in: ids }, teacherId: teacher.id },
 					orderBy: { createdAt: 'asc' }
@@ -56,7 +83,7 @@ export function materiais(teacher: TeacherScope) {
 		 * geração usava material de outra atividade.
 		 */
 		byActivity(activityId: string): Promise<UsedContentUnit[]> {
-			return prisma.contentUnit
+			return db.contentUnit
 				.findMany({
 					where: { teacherId: teacher.id, activities: { some: { id: activityId } } },
 					orderBy: { createdAt: 'asc' },
@@ -69,7 +96,8 @@ export function materiais(teacher: TeacherScope) {
 						data: row.data,
 						// Em mais de uma atividade = veio da biblioteca (ou foi para
 						// ela). É o que a etiqueta "biblioteca" mostra.
-						usedIn: row._count.activities
+						usedIn: row._count.activities,
+						targetLang: idiomaOuNulo(row.targetLang)
 					}))
 				);
 		},
@@ -86,7 +114,7 @@ export function materiais(teacher: TeacherScope) {
 		 */
 		async findEquivalent(kind: ContentUnitKind, data: unknown): Promise<string | null> {
 			const parsed = parseContentUnit(kind, data);
-			const existente = await prisma.contentUnit.findFirst({
+			const existente = await db.contentUnit.findFirst({
 				where: {
 					teacherId: teacher.id,
 					kind,
@@ -111,23 +139,28 @@ export function materiais(teacher: TeacherScope) {
 			kind: ContentUnitKind,
 			data: unknown
 		): Promise<{ id: string; reused: boolean }> {
+			// O material de uma atividade fala o idioma DELA: a tag vem daqui, e
+			// ninguém precisa escolher (`$lib/idiomas.ts`).
+			const idioma = await idiomaDaAtividade(activityId);
 			const equivalente = await this.findEquivalent(kind, data);
 			if (equivalente) {
 				// Já ligado a esta atividade? `connect` é idempotente no N:N, então
 				// não há caso a tratar aqui.
-				await prisma.contentUnit.update({
+				await db.contentUnit.update({
 					where: { id: equivalente },
 					data: { activities: { connect: { id: activityId } } }
 				});
+				await preencherIdioma(equivalente, idioma);
 				return { id: equivalente, reused: true };
 			}
 
 			const parsed = parseContentUnit(kind, data);
-			const criado = await prisma.contentUnit.create({
+			const criado = await db.contentUnit.create({
 				data: {
 					kind,
 					data: parsed as Prisma.InputJsonValue,
 					teacherId: teacher.id,
+					targetLang: idioma,
 					activities: { connect: { id: activityId } }
 				}
 			});
@@ -139,37 +172,53 @@ export function materiais(teacher: TeacherScope) {
 		 * o `kind` não muda: trocar o tipo de um material que já gerou itens
 		 * deixaria `Item.sourceContentId` apontando para outra forma de dado.
 		 */
-		async update(id: string, kind: ContentUnitKind, data: unknown): Promise<boolean> {
+		async update(
+			id: string,
+			kind: ContentUnitKind,
+			data: unknown,
+			idioma?: string | null
+		): Promise<boolean> {
 			const parsed = parseContentUnit(kind, data);
-			const { count } = await prisma.contentUnit.updateMany({
+			const { count } = await db.contentUnit.updateMany({
 				where: { id, teacherId: teacher.id, kind },
 				data: { data: parsed as Prisma.InputJsonValue }
 			});
+			// **O idioma só muda enquanto o material não está em atividade
+			// nenhuma.** Dentro de uma, ele é o da atividade — trocar deixaria uma
+			// frase em inglês etiquetada de espanhol numa atividade de inglês. A
+			// tela trava o seletor; aqui é a barreira de verdade.
+			if (count > 0 && idioma !== undefined) {
+				await db.contentUnit.updateMany({
+					where: { id, teacherId: teacher.id, activities: { none: {} } },
+					data: { targetLang: idiomaOuNulo(idioma) }
+				});
+			}
 			return count > 0;
 		},
 
 		/** Traz para a atividade um material que já está na biblioteca. */
 		async link(activityId: string, contentId: string): Promise<boolean> {
-			const existe = await prisma.contentUnit.findFirst({
+			const existe = await db.contentUnit.findFirst({
 				where: { id: contentId, teacherId: teacher.id },
 				select: { id: true }
 			});
 			if (!existe) return false;
-			await prisma.contentUnit.update({
+			await db.contentUnit.update({
 				where: { id: contentId },
 				data: { activities: { connect: { id: activityId } } }
 			});
+			await preencherIdioma(contentId, await idiomaDaAtividade(activityId));
 			return true;
 		},
 
 		/** Tira o material da atividade — continua na biblioteca do professor. */
 		async unlink(activityId: string, contentId: string): Promise<boolean> {
-			const { count } = await prisma.contentUnit.updateMany({
+			const { count } = await db.contentUnit.updateMany({
 				where: { id: contentId, teacherId: teacher.id },
 				data: {}
 			});
 			if (count === 0) return false;
-			await prisma.contentUnit.update({
+			await db.contentUnit.update({
 				where: { id: contentId },
 				data: { activities: { disconnect: { id: activityId } } }
 			});
@@ -181,20 +230,30 @@ export function materiais(teacher: TeacherScope) {
 		 * `async` de propósito: material fora do schema vira rejeição, não uma
 		 * exceção síncrona no meio de quem chamou.
 		 */
-		async create(kind: ContentUnitKind, data: unknown) {
+		async create(kind: ContentUnitKind, data: unknown, idioma: string | null = null) {
 			const parsed = parseContentUnit(kind, data);
-			return prisma.contentUnit.create({
-				data: { kind, data: parsed as Prisma.InputJsonValue, teacherId: teacher.id }
+			return db.contentUnit.create({
+				data: {
+					kind,
+					data: parsed as Prisma.InputJsonValue,
+					teacherId: teacher.id,
+					targetLang: idiomaOuNulo(idioma)
+				}
 			});
 		},
 
-		async createMany(kind: ContentUnitKind, entries: unknown[]) {
+		/** Reaproveitado na biblioteca: o material que estava sem idioma ganha o escolhido. */
+		preencherIdioma: (contentId: string, idioma: string | null) =>
+			preencherIdioma(contentId, idioma),
+
+		async createMany(kind: ContentUnitKind, entries: unknown[], idioma: string | null = null) {
 			const rows = entries.map((data) => ({
 				kind,
 				data: parseContentUnit(kind, data) as Prisma.InputJsonValue,
-				teacherId: teacher.id
+				teacherId: teacher.id,
+				targetLang: idiomaOuNulo(idioma)
 			}));
-			return prisma.contentUnit.createMany({ data: rows });
+			return db.contentUnit.createMany({ data: rows });
 		},
 
 		/**
@@ -211,7 +270,7 @@ export function materiais(teacher: TeacherScope) {
 		 * para `failed`. Áudio vencido é varrido por `enfileirarAudioFaltante`.
 		 */
 		async remove(id: string): Promise<boolean> {
-			const { count } = await prisma.contentUnit.deleteMany({
+			const { count } = await db.contentUnit.deleteMany({
 				where: { id, teacherId: teacher.id }
 			});
 			return count > 0;

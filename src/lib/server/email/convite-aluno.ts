@@ -1,4 +1,5 @@
 import type { EmailParaEnviar } from './index';
+import { COR, DISPLAY, MONO, SANS, escaparHtml, iniciais, primeiroNome } from './base';
 
 /**
  * O e-mail de convite. **Tabela de 600px, cor literal, sem `var()`, sem
@@ -29,37 +30,6 @@ export interface ConviteAluno {
 	codeUrl: string;
 }
 
-const COR = {
-	marca: '#5A3FF3',
-	marcaClara: '#DCD5FF',
-	texto: '#1A1730',
-	suave: '#6B6690',
-	linha: '#E2DEF2',
-	fundo: '#F5F4FB',
-	chip: '#E7E3F7',
-	branco: '#FFFFFF'
-};
-
-const SANS = "'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif";
-const DISPLAY = "'Bricolage Grotesque', 'Segoe UI', Arial, sans-serif";
-const MONO = "'JetBrains Mono', 'Courier New', monospace";
-
-function iniciais(nome: string): string {
-	return (
-		nome
-			.split(/\s+/)
-			.filter(Boolean)
-			.slice(0, 2)
-			.map((parte) => parte[0]?.toUpperCase())
-			.join('') || '?'
-	);
-}
-
-/** Só o primeiro nome: "Oi, Juliana." lê melhor que o nome completo. */
-function primeiroNome(nome: string): string {
-	return nome.split(/\s+/)[0] || nome;
-}
-
 function ficha(valor: string, rotulo: string): string {
 	return `<td align="center" style="padding:0 6px;">
     <div style="background:${COR.fundo};border:1px solid ${COR.linha};border-radius:10px;padding:11px 8px;">
@@ -72,19 +42,33 @@ function ficha(valor: string, rotulo: string): string {
 export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
 	const nome = primeiroNome(dados.studentName);
 	const professor = primeiroNome(dados.teacherName);
+	// Tudo que veio de uma pessoa é escapado antes de entrar no HTML (base.ts).
+	// O texto puro, mais abaixo, usa os valores crus — lá não há marcação.
+	const h = {
+		nome: escaparHtml(nome),
+		professor: escaparHtml(professor),
+		teacherName: escaparHtml(dados.teacherName),
+		activityTitle: escaparHtml(dados.activityTitle),
+		classroomName: escaparHtml(dados.classroomName),
+		idioma: escaparHtml(dados.languageLabel.toLowerCase()),
+		link: escaparHtml(dados.link),
+		codeUrl: escaparHtml(dados.codeUrl),
+		code: dados.code ? escaparHtml(dados.code) : null,
+		iniciais: escaparHtml(iniciais(dados.teacherName))
+	};
 	const preheader = `${dados.itemCount} questões de ${dados.languageLabel.toLowerCase()}, uns ${dados.minutes} minutos, sem criar conta.`;
 
 	const blocoCodigo = dados.code
-		? `<p style="font-family:${SANS};font-size:13px;color:${COR.suave};margin:14px 0 6px;">Ou entre em ${dados.codeUrl} e digite:</p>
-       <p style="font-family:${MONO};font-size:20px;font-weight:700;letter-spacing:0.28em;color:${COR.marca};margin:0;">${dados.code}</p>`
+		? `<p style="font-family:${SANS};font-size:13px;color:${COR.suave};margin:14px 0 6px;">Ou entre em ${h.codeUrl} e digite:</p>
+       <p style="font-family:${MONO};font-size:20px;font-weight:700;letter-spacing:0.28em;color:${COR.marca};margin:0;">${h.code}</p>`
 		: '';
 
 	const html = `<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>${dados.activityTitle}</title></head>
+<title>${h.activityTitle}</title></head>
 <body style="margin:0;padding:0;background:${COR.fundo};">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;">${preheader}</div>
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">${escaparHtml(preheader)}</div>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:${COR.fundo};padding:24px 12px;">
 <tr><td align="center">
 
@@ -93,28 +77,28 @@ export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
   <tr><td style="padding:17px 26px;background:${COR.marca};border-radius:13px 13px 0 0;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
       <td valign="middle"><span style="font-family:${DISPLAY};font-size:19px;font-weight:800;letter-spacing:-0.02em;color:${COR.branco};">entendo</span></td>
-      <td align="right" valign="middle"><span style="font-family:${SANS};font-size:12px;font-weight:600;color:${COR.marcaClara};">Atividade de ${dados.languageLabel.toLowerCase()}</span></td>
+      <td align="right" valign="middle"><span style="font-family:${SANS};font-size:12px;font-weight:600;color:${COR.marcaClara};">Atividade de ${h.idioma}</span></td>
     </tr></table>
   </td></tr>
 
   <tr><td style="padding:20px 26px;border-bottom:1px solid ${COR.linha};">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
       <td width="50" valign="middle" style="padding:0 13px 0 0;">
-        <div style="width:42px;height:42px;line-height:42px;text-align:center;border-radius:21px;background:${COR.chip};color:${COR.marca};font-family:${SANS};font-size:14px;font-weight:700;">${iniciais(dados.teacherName)}</div>
+        <div style="width:42px;height:42px;line-height:42px;text-align:center;border-radius:21px;background:${COR.chip};color:${COR.marca};font-family:${SANS};font-size:14px;font-weight:700;">${h.iniciais}</div>
       </td>
       <td valign="middle">
-        <p style="font-family:${SANS};font-size:15px;font-weight:700;color:${COR.texto};margin:0 0 3px;">${dados.teacherName}</p>
-        <p style="font-family:${SANS};font-size:12.5px;color:${COR.suave};margin:0;">sua professora de ${dados.languageLabel.toLowerCase()} · turma ${dados.classroomName}</p>
+        <p style="font-family:${SANS};font-size:15px;font-weight:700;color:${COR.texto};margin:0 0 3px;">${h.teacherName}</p>
+        <p style="font-family:${SANS};font-size:12.5px;color:${COR.suave};margin:0;">sua professora de ${h.idioma} · turma ${h.classroomName}</p>
       </td>
     </tr></table>
   </td></tr>
 
   <tr><td style="padding:24px 26px 22px;">
-    <p style="font-family:${DISPLAY};font-size:26px;font-weight:600;letter-spacing:-0.02em;color:${COR.texto};margin:0 0 14px;">Oi, ${nome}.</p>
+    <p style="font-family:${DISPLAY};font-size:26px;font-weight:600;letter-spacing:-0.02em;color:${COR.texto};margin:0 0 14px;">Oi, ${h.nome}.</p>
     <p style="font-family:${SANS};font-size:15px;line-height:1.6;color:${COR.suave};margin:0 0 18px;">
-      ${professor} mandou uma atividade para você fazer. Dá para responder pelo celular, sem instalar nada.
+      ${h.professor} mandou uma atividade para você fazer. Dá para responder pelo celular, sem instalar nada.
     </p>
-    <p style="font-family:${SANS};font-size:16px;font-weight:700;color:${COR.texto};margin:0 0 14px;">${dados.activityTitle}</p>
+    <p style="font-family:${SANS};font-size:16px;font-weight:700;color:${COR.texto};margin:0 0 14px;">${h.activityTitle}</p>
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
       ${ficha(String(dados.itemCount), 'questões')}
       ${ficha(`~${dados.minutes}`, 'minutos')}
@@ -123,7 +107,7 @@ export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
   </td></tr>
 
   <tr><td align="center" style="padding:0 26px 8px;">
-    <a href="${dados.link}" style="display:block;background:${COR.marca};color:${COR.branco};font-family:${SANS};font-size:17px;font-weight:700;text-decoration:none;padding:16px 24px;border-radius:12px;">Começar a atividade</a>
+    <a href="${h.link}" style="display:block;background:${COR.marca};color:${COR.branco};font-family:${SANS};font-size:17px;font-weight:700;text-decoration:none;padding:16px 24px;border-radius:12px;">Começar a atividade</a>
     <p style="font-family:${SANS};font-size:12.5px;color:${COR.suave};margin:10px 0 0;">Sem conta, sem senha, sem instalar aplicativo.</p>
   </td></tr>
 
@@ -131,7 +115,7 @@ export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
     <div style="border-top:1px solid ${COR.linha};padding-top:18px;">
       <p style="font-family:${SANS};font-size:13px;font-weight:700;color:${COR.texto};margin:0 0 6px;">O botão não abriu?</p>
       <p style="font-family:${SANS};font-size:13px;color:${COR.suave};margin:0 0 6px;">Copie e cole este endereço na barra do navegador:</p>
-      <p style="font-family:${MONO};font-size:13px;color:${COR.marca};margin:0;word-break:break-all;">${dados.link}</p>
+      <p style="font-family:${MONO};font-size:13px;color:${COR.marca};margin:0;word-break:break-all;">${h.link}</p>
       ${blocoCodigo}
     </div>
   </td></tr>
@@ -140,7 +124,7 @@ export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:${COR.fundo};border-radius:12px;">
       <tr><td style="padding:14px 16px;">
         <p style="font-family:${SANS};font-size:12.5px;line-height:1.6;color:${COR.suave};margin:0;">
-          <strong style="color:${COR.texto};">Este link é só seu.</strong> É ele que faz o seu nome aparecer certo na lista da ${professor}. Quem receber o link responde no seu lugar, então não repasse.
+          <strong style="color:${COR.texto};">Este link é só seu.</strong> É ele que faz o seu nome aparecer certo na lista da ${h.professor}. Quem receber o link responde no seu lugar, então não repasse.
         </p>
         <p style="font-family:${SANS};font-size:12.5px;line-height:1.6;color:${COR.suave};margin:8px 0 0;">
           Se você tiver uma conta no entendo, entre nela antes de clicar — assim esta turma passa a aparecer no seu histórico. <strong style="color:${COR.texto};">Conta é opcional</strong>: sem ela o link funciona igual.
@@ -151,7 +135,7 @@ export function montarConviteAluno(dados: ConviteAluno): EmailParaEnviar {
 
   <tr><td style="padding:18px 26px 24px;">
     <p style="font-family:${SANS};font-size:11.5px;line-height:1.6;color:${COR.suave};margin:0;">
-      Você recebeu este e-mail porque ${dados.teacherName} cadastrou seu nome na turma ${dados.classroomName}. A entendo não pede senha, telefone, documento nem foto — só o nome e o e-mail que sua professora cadastrou.
+      Você recebeu este e-mail porque ${h.teacherName} cadastrou seu nome na turma ${h.classroomName}. A entendo não pede senha, telefone, documento nem foto — só o nome e o e-mail que sua professora cadastrou.
     </p>
   </td></tr>
 

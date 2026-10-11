@@ -76,13 +76,15 @@ export function turmas(teacher: TeacherScope) {
 								}
 							},
 							attempts: { select: { id: true, finishedAt: true, publicationId: true } },
-							account: { select: { id: true, name: true } }
+							account: { select: { id: true, name: true, avatar: true } }
 						}
 					},
 					deliveries: {
 						orderBy: { createdAt: 'desc' },
 						include: {
 							invites: { select: { id: true, openedAt: true, studentId: true } },
+							// Envio de módulo: o histórico diz de que módulo a atividade veio.
+							module: { select: { name: true } },
 							publication: {
 								include: {
 									activityVersion: { include: { activity: { select: { id: true, title: true } } } },
@@ -208,7 +210,7 @@ export function alunos(teacher: TeacherScope) {
 				where: { id, teacherId: teacher.id },
 				include: {
 					classroom: { select: { id: true, name: true, color: true } },
-					account: { select: { name: true, email: true } },
+					account: { select: { name: true, email: true, avatar: true } },
 					// O convite mais recente: é o que "Reenviar convite" renova, e o que
 					// diz se o último e-mail voltou.
 					invites: {

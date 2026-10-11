@@ -1,4 +1,4 @@
-import { prisma } from '$lib/server/db/client';
+import { prisma, type Db } from '$lib/server/db/client';
 import type { Item } from '$lib/kernel/item';
 import type { Prisma } from '../../../../../generated/prisma/client.ts';
 
@@ -22,10 +22,10 @@ type TeacherScope = { id: string };
  * versão nova: ele PUBLICA o rascunho, e a partir daí aquela versão está
  * congelada (regra inviolável nº 7). A próxima edição abre a versão seguinte.
  */
-export function atividades(teacher: TeacherScope) {
+export function atividades(teacher: TeacherScope, db: Db = prisma) {
 	return {
 		byId(id: string) {
-			return prisma.activity.findFirst({ where: { id, teacherId: teacher.id } });
+			return db.activity.findFirst({ where: { id, teacherId: teacher.id } });
 		},
 
 		list() {
@@ -41,7 +41,9 @@ export function atividades(teacher: TeacherScope) {
 								select: { id: true, slug: true, _count: { select: { attempts: true } } }
 							}
 						}
-					}
+					},
+					// Os módulos em que ela está — para a lista filtrar por módulo.
+					modules: { select: { module: { select: { id: true, name: true } } } }
 				}
 			});
 		},
@@ -56,16 +58,20 @@ export function atividades(teacher: TeacherScope) {
 			title: string,
 			sourceLang: string,
 			targetLang: string,
-			plano: { itemTarget: number; skills: string[] }
+			plano: { itemTarget: number; skills: string[]; level?: string | null }
 		) {
-			return prisma.activity.create({
+			// `db`, não `prisma`: criar atividade acontece DENTRO da trava de cota
+			// (`$lib/server/billing/cota.ts`), e fora da transação a escrita iria
+			// por outra conexão.
+			return db.activity.create({
 				data: {
 					title,
 					sourceLang,
 					targetLang,
 					teacherId: teacher.id,
 					itemTarget: plano.itemTarget,
-					skills: plano.skills
+					skills: plano.skills,
+					level: plano.level ?? null
 				}
 			});
 		},
@@ -311,6 +317,68 @@ export function atividades(teacher: TeacherScope) {
 				return tx.publication.create({
 					data: { slug, settings, activityVersionId: draft.id }
 				});
+			});
+		},
+
+		/** Troca o nível (rótulo). Nulo = sem nível. Quem chama já validou contra a escala. */
+		async definirNivel(id: string, level: string | null): Promise<boolean> {
+			const { count } = await db.activity.updateMany({
+				where: { id, teacherId: teacher.id },
+				data: { level }
+			});
+			return count > 0;
+		},
+
+		/**
+		 * Arquiva: a atividade sai do estoque do plano (libera a vaga), o link
+		 * FECHA para quem ainda não começou e os resultados ficam
+		 * (docs/adr-002-billing.md). Nada é apagado. Devolve se era dele.
+		 */
+		async arquivar(id: string): Promise<boolean> {
+			const { count } = await db.activity.updateMany({
+				where: { id, teacherId: teacher.id, archivedAt: null },
+				data: { archivedAt: new Date() }
+			});
+			return count > 0;
+		},
+
+		/** Desarquiva. Quem chama confere a vaga ANTES, dentro da trava de cota. */
+		async desarquivar(id: string): Promise<boolean> {
+			const { count } = await db.activity.updateMany({
+				where: { id, teacherId: teacher.id, archivedAt: { not: null } },
+				data: { archivedAt: null }
+			});
+			return count > 0;
+		},
+
+		/**
+		 * Apaga DE VEZ, com as tentativas e os resultados — o professor confirma
+		 * na tela sabendo disso. Devolve falso quando a atividade não existe ou
+		 * é de outro professor (sem distinguir os dois, auth.md).
+		 *
+		 * A ordem é obrigatória: `Publication→ActivityVersion`, `Attempt→Publication`
+		 * e `AttemptItem→Item` são `RESTRICT` no banco. Tentativa primeiro (leva os
+		 * `AttemptItem` em cascata e solta os itens), publicação depois (leva
+		 * envios e convites), e por fim a atividade (versões, itens, vínculos com
+		 * material e com módulo). **Não** trocar esses RESTRICT por Cascade: são eles
+		 * que impedem que apagar um professor, ou uma versão, leve junto respostas
+		 * de aluno por acidente.
+		 *
+		 * O áudio (`MediaAsset`) fica — é do professor, identificado pelo conteúdo, e
+		 * vence sozinho. As gravações de fala do aluno (`fala/`) vencem pela regra de
+		 * ciclo de vida do bucket, como em `apagarTentativa`.
+		 */
+		async apagarDeVez(id: string): Promise<boolean> {
+			const dono = { id, teacherId: teacher.id };
+			return prisma.$transaction(async (tx) => {
+				const existe = await tx.activity.findFirst({ where: dono, select: { id: true } });
+				if (!existe) return false;
+				await tx.attempt.deleteMany({
+					where: { publication: { activityVersion: { activity: dono } } }
+				});
+				await tx.publication.deleteMany({ where: { activityVersion: { activity: dono } } });
+				const { count } = await tx.activity.deleteMany({ where: dono });
+				return count > 0;
 			});
 		},
 

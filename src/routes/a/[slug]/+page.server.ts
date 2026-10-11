@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
+import { nivelOuNulo, rotuloDoNivel } from '$lib/atividades/nivel';
 import { playerRepo } from '$lib/server/db/repos/player';
 import { itemAudioHashes, itemSkills } from '$lib/server/player/runtime';
 import { enfileirarAudioFaltante } from '$lib/server/tts/enfileirar';
@@ -26,6 +27,20 @@ export const load: PageServerLoad = async ({ params, cookies, locals }) => {
 
 	const { activityVersion } = publication;
 	const itemCount = activityVersion.items.length;
+
+	// **Arquivada fecha a entrada** (docs/adr-002-billing.md): o professor tirou a
+	// atividade do ar para liberar a vaga do plano. Quem já começou ainda
+	// termina — por isso a retomada é olhada antes de recusar. E isto vem ANTES
+	// do áudio: link fechado não pode enfileirar síntese a cada visita.
+	const anonIdCedo = cookies.get('entendo_anon');
+	if (activityVersion.activity.archivedAt) {
+		const emAndamento = anonIdCedo
+			? await playerRepo.resumableAttempt(publication.id, anonIdCedo)
+			: null;
+		if (!emAndamento) {
+			error(410, { message: 'Esta atividade foi encerrada', reason: 'unpublished' });
+		}
+	}
 
 	// O link só fica ativo quando todo o áudio existe (server.md "TTS").
 	const hashes = activityVersion.items.flatMap((item) =>
@@ -80,6 +95,7 @@ export const load: PageServerLoad = async ({ params, cookies, locals }) => {
 	const temFala = habilidades.includes('speaking');
 
 	const minutesPerItem = 0.5;
+	const nivel = nivelOuNulo(activityVersion.activity.level);
 	return {
 		activity: {
 			title: activityVersion.activity.title,
@@ -87,13 +103,15 @@ export const load: PageServerLoad = async ({ params, cookies, locals }) => {
 			minutes: Math.max(1, Math.round(itemCount * minutesPerItem)),
 			targetLabel: labelForTag(activityVersion.activity.targetLang),
 			skills,
-			temFala
+			temFala,
+			// O nível que o professor deu — rótulo, aparece ao lado do idioma.
+			nivel: nivel ? rotuloDoNivel(nivel) : null
 		},
 		student: student ? { name: student.name } : null,
 		// A conta do aluno, quando existe. É OFERTA, nunca exigência: a tela
 		// cumprimenta quem está logado e mostra o convite para quem não está,
 		// e os dois começam a atividade pelo mesmo botão.
-		account: locals.aluno ? { name: locals.aluno.name } : null,
+		account: locals.aluno ? { name: locals.aluno.name, avatar: locals.aluno.avatar ?? null } : null,
 		// É informação de TELA, não uma tranca: a identidade aqui é um cookie de
 		// aparelho. Bloquear no servidor deixaria sem recurso quem trocou de
 		// celular ou limpou o navegador — e a atividade é do professor, que pode

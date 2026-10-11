@@ -4,7 +4,13 @@
 	// e o que "remover" significa: apagar da biblioteca, ou só tirar desta
 	// atividade. Tudo o mais é uma linha só, desenhada uma vez.
 	import Loading from './Loading.svelte';
+	import IdiomaTag from './IdiomaTag.svelte';
 	import { PILL_TONE, tipoDe, type MaterialRow } from './material-form';
+	import { getProfile } from '$lib/kernel/language/profiles';
+	import { idiomaDe } from '$lib/idiomas';
+
+	/** A biblioteca mistura idiomas: cada linha mostra o conteúdo na direção da língua DELA. */
+	const direcaoDe = (tag: string) => (idiomaDe(tag) ? getProfile(tag).direction : 'ltr');
 
 	let {
 		materiais,
@@ -29,7 +35,7 @@
 	} = $props();
 
 	const wiz = $derived(contexto === 'wizard');
-	const colunas = 'lg:grid-cols-[132px_minmax(0,1fr)_92px_128px_96px]';
+	const colunas = 'lg:grid-cols-[132px_minmax(0,1fr)_148px_128px_96px]';
 </script>
 
 <div class="overflow-hidden rounded-box border border-line">
@@ -73,8 +79,8 @@
 			<span class="col-span-2 row-start-2 min-w-0 lg:col-span-1 lg:row-auto">
 				<span
 					class="mb-0.5 block truncate font-content text-[14px] font-semibold"
-					{dir}
-					data-content-lang={contentTag}>{m.primary}</span
+					dir={m.idioma ? direcaoDe(m.idioma) : dir}
+					data-content-lang={m.idioma ?? contentTag}>{m.primary}</span
 				>
 				<span
 					class="block truncate text-[12.5px] {m.kind === 'text' && m.questions.length === 0
@@ -82,9 +88,7 @@
 						: 'text-base-content/65'}">{m.secondary}</span
 				>
 			</span>
-			<span class="hidden truncate text-[13px] text-base-content/65 lg:block"
-				>{m.language || '—'}</span
-			>
+			<span class="hidden min-w-0 lg:block"><IdiomaTag tag={m.idioma} /></span>
 			<span class="hidden min-w-0 lg:block">
 				{#if wiz}
 					{#if m.daBiblioteca}

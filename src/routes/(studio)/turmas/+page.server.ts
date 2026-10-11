@@ -2,6 +2,7 @@ import type { PageServerLoad } from './$types';
 import { requireTeacher } from '$lib/server/auth/guard';
 import { turmas } from '$lib/server/db/repos/classrooms';
 import { labelForTag } from '$lib/kernel/language/profiles';
+import { idiomaOuNulo } from '$lib/idiomas';
 import { etiquetaDaTurma } from '$lib/server/turmas/etiqueta';
 
 /** Quanto tempo faz, em português, sem trazer uma biblioteca de datas. */
@@ -29,6 +30,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			badge: etiquetaDaTurma(turma.name),
 			color: turma.color,
 			languageLabel: turma.languageTag ? labelForTag(turma.languageTag) : null,
+			/** A tag de idioma (`$lib/idiomas.ts`); nula = turma sem idioma. */
+			idioma: idiomaOuNulo(turma.languageTag),
 			students: turma.students,
 			withEmail: turma.withEmail,
 			deliveries: turma.deliveries,

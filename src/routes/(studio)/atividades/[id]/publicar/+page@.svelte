@@ -118,6 +118,8 @@
 	let turmasEscolhidas = $state<string[]>([]);
 	let enviando = $state(false);
 	let enviados = $state<number | null>(null);
+	/** A recusa do servidor (áudio não pronto, arquivada) — dita, nunca um clique que não faz nada. */
+	let erroEnvio = $state<string | null>(null);
 
 	function alternarTurma(id: string) {
 		turmasEscolhidas = turmasEscolhidas.includes(id)
@@ -128,6 +130,7 @@
 	async function enviar() {
 		if (turmasEscolhidas.length === 0) return;
 		enviando = true;
+		erroEnvio = null;
 		try {
 			const r = await enviarParaTurmas({
 				activityId: data.activity.id,
@@ -136,6 +139,9 @@
 			// A confirmação dá o número REAL e diz que a fila está andando —
 			// nunca que chegou.
 			if (r.ok) enviados = r.enfileirados ?? 0;
+			else erroEnvio = r.error ?? 'Não deu para enviar agora.';
+		} catch {
+			erroEnvio = 'Não deu para enviar agora. Tente de novo em instantes.';
 		} finally {
 			enviando = false;
 		}
@@ -427,15 +433,17 @@
 							role="alert"
 						>
 							<p>{publicarAtividade.result.error}</p>
-							{#if 'motivo' in publicarAtividade.result && publicarAtividade.result.motivo === 'assinatura'}
+							{#if 'motivo' in publicarAtividade.result && publicarAtividade.result.motivo}
 								<!-- Erro de cobrança tem saída, e ela não é "tente de novo": é
 								     escolher um plano. O rascunho continua salvo. -->
 								<p class="mt-2 leading-relaxed text-base-content/65">
 									O que você montou continua salvo como rascunho.
-									<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- é a própria rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
-									<a href={resolve('/(site)/planos') + '?motivo=publicar'} class="font-bold"
-										>Ver os planos</a
+									<!-- eslint-disable svelte/no-navigation-without-resolve -- é a própria rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+									<a
+										href={resolve('/(site)/planos') + '?motivo=' + publicarAtividade.result.motivo}
+										class="font-bold">Ver os planos</a
 									>
+									<!-- eslint-enable svelte/no-navigation-without-resolve -->
 								</p>
 							{/if}
 						</div>
@@ -615,6 +623,11 @@
 				     código — nunca um passo do wizard, e não muda quem pode entrar
 				     pelo link aberto. -->
 				<div class="rounded-box border border-line bg-base-100 px-[1.35rem] py-5">
+					{#if erroEnvio}
+						<p class="mb-3 text-[0.84rem] leading-relaxed font-semibold text-error" role="alert">
+							{erroEnvio}
+						</p>
+					{/if}
 					{#if enviados !== null}
 						<p class="mb-1.5 flex items-center gap-2 text-[0.88rem] font-bold text-primary">
 							<svg class="size-[1.05rem]" viewBox="0 0 24 24" fill="none" aria-hidden="true">

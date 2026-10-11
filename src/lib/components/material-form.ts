@@ -32,8 +32,8 @@ export interface MaterialRow {
 	secondary: string;
 	/** Em quantas atividades ele está. */
 	usedIn: number;
-	/** Rótulo do idioma, quando há um a mostrar. */
-	language?: string;
+	/** A tag de idioma do material (`$lib/idiomas.ts`); nula = sem idioma. */
+	idioma?: string | null;
 	/** Wizard: está em mais de uma atividade, ou seja, veio da biblioteca. */
 	daBiblioteca?: boolean;
 	target: string;

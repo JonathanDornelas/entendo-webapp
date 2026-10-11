@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { prisma } from '$lib/server/db/client';
+import { prisma, type Db } from '$lib/server/db/client';
 
 /**
  * Fila em tabela Postgres, sem Redis — ver server.md "Fila". O worker faz o
@@ -51,7 +51,134 @@ export async function enqueueConvites(jobs: ConviteJob[]): Promise<void> {
 	});
 }
 
+/**
+ * O convite de MÓDULO: UM e-mail por aluno com o link pessoal de cada
+ * atividade do módulo (docs/adr-004-modulos-e-nivel.md). Um e-mail por
+ * atividade seria cinco e-mails para a mesma turma no mesmo minuto — e o plano
+ * grátis do Resend dá 100 por dia.
+ *
+ * `inviteIds` são os convites que este e-mail entrega: o worker só manda se
+ * algum deles ainda não saiu, e marca todos como enviados depois.
+ */
+export const conviteModuloJobSchema = z.object({
+	inviteIds: z.array(z.string()).min(1),
+	to: z.string(),
+	studentName: z.string(),
+	teacherName: z.string(),
+	moduleName: z.string(),
+	classroomName: z.string(),
+	atividades: z
+		.array(
+			z.object({
+				title: z.string(),
+				languageLabel: z.string(),
+				itemCount: z.number().int(),
+				minutes: z.number().int(),
+				link: z.string(),
+				code: z.string().nullable(),
+				codeUrl: z.string()
+			})
+		)
+		.min(1)
+});
+export type ConviteModuloJob = z.infer<typeof conviteModuloJobSchema>;
+
+export async function enqueueConvitesDeModulo(jobs: ConviteModuloJob[]): Promise<void> {
+	if (jobs.length === 0) return;
+	await prisma.job.createMany({
+		data: jobs.map((job) => ({ type: 'convite-modulo', payload: job }))
+	});
+}
+
+/**
+ * O convite para um PROFESSOR entrar numa escola (docs/adr-005-escola.md).
+ * `expiresAt` vai em ISO porque o payload é JSON. O worker só manda se o
+ * convite ainda existe, não foi aceito e não venceu — e marca `sentAt`.
+ */
+export const conviteEscolaJobSchema = z.object({
+	inviteId: z.string(),
+	to: z.string(),
+	schoolName: z.string(),
+	quemConvidou: z.string(),
+	role: z.enum(['coordenacao', 'professor']),
+	link: z.string(),
+	expiresAt: z.string()
+});
+export type ConviteEscolaJob = z.infer<typeof conviteEscolaJobSchema>;
+
+export async function enqueueConviteEscola(job: ConviteEscolaJob): Promise<void> {
+	await prisma.job.create({
+		data: { type: 'convite-escola', payload: conviteEscolaJobSchema.parse(job) }
+	});
+}
+
+/**
+ * Aviso para a EQUIPE (formulário de contato, pedido de plano). Vai para
+ * `CONTATO_PARA`; sem ela configurada, o worker registra no log — mesmo padrão
+ * do e-mail sem provedor. Pela fila, e não na requisição, pelo mesmo motivo do
+ * convite: provedor fora do ar vira retentativa, não erro na tela de quem pediu.
+ */
+export const avisoEquipeJobSchema = z.object({
+	assunto: z.string().min(1).max(200),
+	texto: z.string().min(1).max(10_000),
+	replyTo: z.string().email().optional()
+});
+export type AvisoEquipeJob = z.infer<typeof avisoEquipeJobSchema>;
+
+export async function enqueueAvisoEquipe(job: AvisoEquipeJob, db: Db = prisma): Promise<void> {
+	await db.job.create({ data: { type: 'aviso-equipe', payload: avisoEquipeJobSchema.parse(job) } });
+}
+
+/**
+ * O link de REDEFINIR SENHA, do professor ou do aluno (as duas instâncias de
+ * Better Auth, auth.md). Pela fila pelo mesmo motivo do convite: provedor fora
+ * do ar vira retentativa, não erro — e a tela de "esqueci a senha" responde
+ * igual exista ou não a conta, então ela nem saberia mostrar a falha. `expiraEm`
+ * (ISO) é a validade do link: o worker não manda um que já venceu na fila.
+ */
+export const redefinirSenhaJobSchema = z.object({
+	to: z.string(),
+	nome: z.string(),
+	link: z.string(),
+	conta: z.enum(['professor', 'aluno']),
+	expiraEm: z.string()
+});
+export type RedefinirSenhaJob = z.infer<typeof redefinirSenhaJobSchema>;
+
+export async function enqueueRedefinirSenha(job: RedefinirSenhaJob): Promise<void> {
+	await prisma.job.create({
+		data: { type: 'redefinir-senha', payload: redefinirSenhaJobSchema.parse(job) }
+	});
+}
+
 /** Jobs que falharam depois de esgotar as tentativas — nunca somem em silêncio. */
+/**
+ * O envio PROGRAMADO de um módulo para uma turma (docs/telas-modulos-professor.md
+ * 2.4). O job não carrega o QUE sai: ele só acorda na hora (`runAfter`) e
+ * pergunta ao banco o que está devido naquela alocação
+ * (`processarEnviosDevidos`). É isso que o torna idempotente e à prova de
+ * reprogramação: um job de uma data que mudou acorda, não acha nada devido, e
+ * termina sem efeito.
+ */
+export const envioProgramadoJobSchema = z.object({ allocationId: z.string() });
+export type EnvioProgramadoJob = z.infer<typeof envioProgramadoJobSchema>;
+
+/** Um job por instante distinto. Instante no passado = sai na próxima volta do worker. */
+export async function enqueueEnviosProgramados(
+	allocationId: string,
+	instantes: Date[]
+): Promise<void> {
+	const unicos = [...new Set(instantes.map((d) => d.getTime()))];
+	if (unicos.length === 0) return;
+	await prisma.job.createMany({
+		data: unicos.map((t) => ({
+			type: 'envio-programado',
+			payload: { allocationId } satisfies EnvioProgramadoJob,
+			runAfter: new Date(t)
+		}))
+	});
+}
+
 export function failedJobs(limit = 50) {
 	return prisma.job.findMany({
 		where: { status: 'failed' },

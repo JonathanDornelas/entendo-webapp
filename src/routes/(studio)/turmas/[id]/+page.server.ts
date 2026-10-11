@@ -3,7 +3,16 @@ import type { PageServerLoad } from './$types';
 import { requireTeacher } from '$lib/server/auth/guard';
 import { turmas } from '$lib/server/db/repos/classrooms';
 import { labelForTag } from '$lib/kernel/language/profiles';
+import { idiomaOuNulo } from '$lib/idiomas';
 import { etiquetaDaTurma } from '$lib/server/turmas/etiqueta';
+import { programacoes } from '$lib/server/db/repos/programacoes';
+import { resumoDaProgramacao } from '$lib/modulos/programacao';
+import {
+	contagemDeEnvios,
+	estadoDaAlocacao,
+	proximoEnvio,
+	rotuloDoInstante
+} from '$lib/modulos/estado';
 
 /**
  * A turma. Três blocos numa rolagem: cabeçalho com os quatro números que
@@ -13,7 +22,8 @@ import { etiquetaDaTurma } from '$lib/server/turmas/etiqueta';
  * e verde e âmbar ficam de fora porque são a semântica de correção. Vermelho
  * aparece só em "Voltou", que é o único que pede ação.
  */
-export type EstadoAluno = 'terminou' | 'comecou' | 'enviado' | 'sem-envio' | 'sem-email' | 'voltou';
+export type EstadoAluno =
+	'terminou' | 'comecou' | 'enviado' | 'disponivel' | 'sem-envio' | 'sem-email' | 'voltou';
 
 function haQuantoTempo(data: Date | null): string {
 	if (!data) return 'nunca';
@@ -46,22 +56,54 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 
 	const ultimoEnvio = turma.deliveries[0] ?? null;
 
+	// "Módulos desta turma" (docs/telas-modulos-professor.md 2.3): a programação
+	// de cada módulo alocado, dita como no detalhe do módulo.
+	const alocacoes = await programacoes(teacher).daTurma(turma.id);
+	const modulos = alocacoes.map((a) => {
+		const estado = estadoDaAlocacao(a);
+		const ids = a.modulo.atividades.map((x) => x.id);
+		const { enviadas, total } = contagemDeEnvios(a.programacao, a.envios, ids);
+		const prox = proximoEnvio(a.envios);
+		const falha = a.envios.find((e) => e.status === 'nao_saiu');
+		const titulo = (id: string) =>
+			a.modulo.atividades.find((x) => x.id === id)?.title ?? 'uma atividade';
+		const quando = a.programacao ? resumoDaProgramacao(a.programacao) : '';
+		return {
+			allocationId: a.id,
+			moduleId: a.modulo.id,
+			name: a.modulo.name,
+			badge: etiquetaDaTurma(a.modulo.name),
+			color: a.modulo.color,
+			estado,
+			resumo:
+				estado === 'sem'
+					? 'alocada · nada enviado ainda'
+					: estado === 'falha' && falha
+						? `${quando} · ${enviadas} de ${total} enviadas · ${titulo(falha.activityId)} esperando desde ${rotuloDoInstante(falha.dueAt)}`
+						: `${quando} · ${enviadas} de ${total} enviadas${prox && !a.pausedAt ? ` · próxima ${rotuloDoInstante(prox.dueAt)}` : ''}`
+		};
+	});
+
 	const students = turma.students.map((aluno) => {
 		const convite = aluno.invites[0] ?? null;
 
 		// "Sem e-mail" é sobre o CADASTRO; "sem envio" é sobre a turma ainda não
 		// ter recebido nada. Confundir os dois marcava como "sem e-mail" um
 		// aluno que tem e-mail e só não foi convidado ainda.
+		//
+		// "Disponível" é o envio de módulo SEM e-mail (`Delivery.porEmail` falso): a
+		// atividade abriu no mapa e o link pessoal existe, mas ninguém foi avisado —
+		// dizer "Enviado" ali seria afirmar que um e-mail saiu.
+		const tentativa = convite
+			? aluno.attempts.find((a) => a.publicationId === convite.delivery.publicationId)
+			: undefined;
 		let estado: EstadoAluno;
-		if (!aluno.email) estado = 'sem-email';
+		if (convite && !convite.delivery.porEmail) {
+			estado = tentativa?.finishedAt ? 'terminou' : tentativa ? 'comecou' : 'disponivel';
+		} else if (!aluno.email) estado = 'sem-email';
 		else if (!convite) estado = 'sem-envio';
 		else if (convite.bouncedAt) estado = 'voltou';
-		else {
-			const tentativa = aluno.attempts.find(
-				(a) => a.publicationId === convite.delivery.publicationId
-			);
-			estado = tentativa?.finishedAt ? 'terminou' : tentativa ? 'comecou' : 'enviado';
-		}
+		else estado = tentativa?.finishedAt ? 'terminou' : tentativa ? 'comecou' : 'enviado';
 
 		return {
 			id: aluno.id,
@@ -76,7 +118,10 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			// convite logado. É informação, não estado da chamada: aluno com
 			// conta e aluno sem conta participam igual, e por isso isto não entra
 			// na contagem de estados nem muda o que o professor pode fazer.
-			temConta: !!aluno.account
+			temConta: !!aluno.account,
+			// O avatar que o aluno montou na conta dele — o ícone dele na chamada.
+			// Sem conta, as iniciais (o próprio `Avatar` cai nelas).
+			avatar: aluno.account?.avatar ?? null
 		};
 	});
 
@@ -85,7 +130,15 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			acc[aluno.state]++;
 			return acc;
 		},
-		{ terminou: 0, comecou: 0, enviado: 0, 'sem-envio': 0, 'sem-email': 0, voltou: 0 }
+		{
+			terminou: 0,
+			comecou: 0,
+			enviado: 0,
+			disponivel: 0,
+			'sem-envio': 0,
+			'sem-email': 0,
+			voltou: 0
+		}
 	);
 
 	const deliveries = turma.deliveries.map((envio) => {
@@ -97,6 +150,8 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			id: envio.id,
 			activityId: envio.publication.activityVersion.activity.id,
 			activityTitle: envio.publication.activityVersion.activity.title,
+			moduleName: envio.module?.name ?? null,
+			porEmail: envio.porEmail,
 			when: haQuantoTempo(envio.createdAt),
 			invites: envio.invites.length,
 			opened: envio.invites.filter((c) => c.openedAt).length,
@@ -113,6 +168,7 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			badge: etiquetaDaTurma(turma.name),
 			color: turma.color,
 			languageLabel: turma.languageTag ? labelForTag(turma.languageTag) : null,
+			idioma: idiomaOuNulo(turma.languageTag),
 			createdAt: turma.createdAt.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' })
 		},
 		totals: {
@@ -126,11 +182,13 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 					id: ultimoEnvio.id,
 					activityTitle: ultimoEnvio.publication.activityVersion.activity.title,
 					when: haQuantoTempo(ultimoEnvio.createdAt),
+					porEmail: ultimoEnvio.porEmail,
 					unopened: ultimoEnvio.invites.filter((c) => !c.openedAt).length
 				}
 			: null,
 		students,
 		tally: contagem,
-		deliveries
+		deliveries,
+		modulos
 	};
 };

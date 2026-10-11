@@ -1,0 +1,72 @@
+# ADR-003 — Geração de material por IA (Gemini) e créditos
+
+**Estado:** aceito · outubro de 2026
+
+## Contexto
+
+"Gerar com IA" existia só como tela em `MaterialForm.svelte`, com o botão travado. Os planos Pro e
+Super vendem créditos de IA, então a geração precisava existir de verdade. O dono escolheu o
+**Gemini**.
+
+## Decisões
+
+### 1. O que a IA faz — e o que não faz
+
+A IA **propõe materiais** (pares de frases, vocabulário, textos com perguntas, diálogos) a partir de
+um pedido do professor. Ela **não** gera exercícios: os exercícios continuam saindo dos geradores
+determinísticos do kernel. Nada entra na biblioteca antes de o professor marcar e confirmar.
+
+### 2. Atrás de interface própria
+
+`src/lib/server/ia/` — `provider.ts` (interface), `gemini-provider.ts` (`@google/genai`),
+`index.ts` (lê `LLM_PROVIDER`; vazio = IA desligada, como `TTS_PROVIDER`). Nenhum código de produto
+importa o SDK.
+
+- **Saída estruturada**: o JSON Schema vai em `responseJsonSchema`, gerado com `z.toJSONSchema` a
+  partir do MESMO Zod que valida a volta (`schemas.ts`).
+- **Tudo é revalidado** contra `contentUnitSchemas` do kernel — a régua da autoria manual. O schema da
+  proposta não tem `note` (a nota é do professor) nem `imageMediaId`.
+- **O id do modelo não está no código**: `GEMINI_MODEL`. O catálogo do Gemini muda de nome com
+  frequência; quem opera escolhe o Flash estável vigente.
+- **Agnóstico de idioma**: o prompt (`prompt.ts`) só recebe rótulos de idioma do `LanguageProfile`.
+  Um teste garante que a estrutura é a mesma para todo profile. O texto do professor vai delimitado,
+  como dado, depois das instruções.
+
+### 3. Créditos como livro-razão
+
+`CreditEntry` guarda só lançamentos (débito, estorno, cortesia). Saldo = franquia do plano em vigor
+**mais** a soma dos lançamentos do ciclo atual (`cicloInicio`). Não existe escrita de "reset":
+virar o mês é só o ciclo mudar, e trocar de plano no meio do ciclo vale na hora.
+
+O ciclo é mensal, ancorado no dia da ativação (`Teacher.cycleAnchor`; na escola, a data de entrada),
+com dia 31 caindo no último dia dos meses curtos (`src/lib/billing/ciclo.ts`).
+
+### 4. Fluxo e idempotência
+
+`gerarPropostas` (`src/lib/server/ia/gerar.ts`):
+
+1. Debita `quantos × CUSTO_IA` numa transação curta, sob a trava por professor. O `refKey` é o
+   `requestId` gerado no cliente: clique duplo debita uma vez.
+2. Chama o provedor **fora** da transação, com teto de 45 s.
+3. Valida, remove repetidas e marca "você já tem" (`findEquivalent`).
+4. Estorna o que não veio ou não serviu (`<requestId>:estorno`, no mesmo ciclo do débito).
+
+Aceitar (`aceitarPropostasIa`) revalida no servidor e grava por `gravarMateriais` — com a cota de
+estoque, igual à autoria manual.
+
+### 5. Regras de plano
+
+`can(estado, 'usar_ia')` exige plano com IA **e** saldo. O Básico não gera nem com crédito de
+cortesia. Créditos de cortesia (painel interno) valem só no ciclo atual.
+
+## Privacidade
+
+O pedido do professor e os nomes dos idiomas vão ao Google; nenhum dado de aluno. A política de
+privacidade diz isso, e afirma o uso da **modalidade paga** da API (sem uso para treinamento) —
+**quem opera precisa garantir que a chave é de um projeto com faturamento ativo**; a camada gratuita
+do Gemini pode usar os dados para melhorar o produto.
+
+## Pendências
+
+- Fonte por imagem e por vídeo (o Gemini aceita; falta upload e leitura de arquivo).
+- Custo diferente por fonte, se imagem e vídeo entrarem (`CUSTO_IA`).

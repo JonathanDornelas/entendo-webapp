@@ -1,31 +1,31 @@
 /**
- * Os planos, num arquivo só — o texto nunca fica solto numa rota (paginas.md
- * "Grupo (site)"). A home e `/planos` leem daqui, então preço e nome de plano
- * nunca podem divergir entre as duas.
+ * Os planos como a VITRINE os mostra, num arquivo só — o texto nunca fica solto
+ * numa rota (paginas.md "Grupo (site)"). A home e `/planos` leem daqui.
+ *
+ * **Os NÚMEROS não moram aqui.** Atividades, materiais e créditos de cada plano
+ * saem de `$lib/billing/catalogo.ts` — o mesmo arquivo que `can()` usa para
+ * decidir acesso —, então o que a tabela PROMETE e o que a conta PODE fazer não
+ * têm como divergir. `catalogo.test.ts` confere isso.
  *
  * ┌──────────────────────────────────────────────────────────────────────┐
- * │ OS PREÇOS SÃO PLACEHOLDER. Nome de plano, valor, ciclo, o que cada   │
- * │ um libera e a duração do trial NÃO FORAM DECIDIDOS — são pendência   │
- * │ de produto (CLAUDE.md "Pendências", billing.md). O que está aqui é   │
- * │ mock para a tela existir e ser navegável.                           │
- * │                                                                      │
- * │ Nada disto está ligado à cobrança: não existe produto no provedor,   │
- * │ e `can()` (billing.md "Entitlements") continua sendo o único ponto   │
- * │ de decisão de acesso — ele não lê este arquivo. Trocar um valor      │
- * │ aqui muda o que a tela MOSTRA, nunca o que a conta PODE fazer.       │
+ * │ OS PREÇOS SÃO PLACEHOLDER. Valor e ciclo NÃO FORAM DECIDIDOS — são   │
+ * │ pendência de produto (CLAUDE.md "Pendências", adr-002-billing.md).   │
+ * │ Não há gateway de pagamento: "Assinar" registra um PEDIDO que a      │
+ * │ equipe atende pelo painel interno.                                   │
  * └──────────────────────────────────────────────────────────────────────┘
- *
- * Antes de publicar: revisar com quem decide preço, e ligar os ids aos
- * produtos do provedor no `BillingProvider`.
  */
+import {
+	LIMITES,
+	NOME_DO_PLANO,
+	TRIAL,
+	type CicloDeCobranca,
+	type PlanoId
+} from '$lib/billing/catalogo';
 
-/** Marca para o desenvolvedor: nenhum número deste arquivo foi aprovado. */
+/** Marca para o desenvolvedor: nenhum PREÇO deste arquivo foi aprovado. */
 export const PRECOS_SAO_PLACEHOLDER = true;
 
-export type CicloDeCobranca = 'mensal' | 'anual';
-
-/** Os ids são internos — o mapeamento para o provedor ainda não existe. */
-export type PlanoId = 'livre' | 'professor' | 'escola';
+export type { CicloDeCobranca, PlanoId };
 
 export interface Recurso {
 	label: string;
@@ -38,8 +38,8 @@ export interface Plano {
 	nome: string;
 	/** Para quem é, em três palavras. Vai sob o nome. */
 	para: string;
-	/** Ícone: `spark` | `person` | `school` — a tela escolhe o desenho. */
-	icone: 'spark' | 'person' | 'school';
+	/** Ícone: a tela escolhe o desenho. */
+	icone: 'person' | 'spark' | 'bolt' | 'school';
 	/** Preço por ciclo, já formatado — é texto de tela, não número de conta. */
 	preco: Record<CicloDeCobranca, string>;
 	/** A unidade ao lado do preço: "por mês", "por professor / mês". */
@@ -53,76 +53,101 @@ export interface Plano {
 	ctaNota: string;
 	/** Um só por tabela: o plano em destaque. */
 	destaque?: string;
+	/** Contratado pela escola, não assinado pelo professor: o CTA leva ao contato. */
+	porContrato?: boolean;
 }
+
+const fmt = (n: number) => n.toLocaleString('pt-BR');
+
+/** As linhas de limite de um plano pago, escritas a partir do catálogo. */
+function limites(id: 'basico' | 'pro' | 'super'): Recurso[] {
+	const l = LIMITES[id];
+	return [
+		{ label: `Até ${fmt(l.atividades)} atividades ao mesmo tempo`, incluso: true },
+		{ label: `Até ${fmt(l.materiais)} materiais na biblioteca`, incluso: true },
+		l.ia
+			? { label: `${fmt(l.creditosPorCiclo)} créditos de IA por mês`, incluso: true }
+			: { label: 'Materiais gerados com IA', incluso: false }
+	];
+}
+
+const COMUM: Recurso[] = [
+	{ label: 'Escuta, fala, leitura e escrita', incluso: true },
+	{ label: 'Turmas e convites por e-mail', incluso: true }
+];
 
 export const planos: readonly Plano[] = [
 	{
-		id: 'livre',
-		nome: 'Livre',
-		para: 'para experimentar',
-		icone: 'spark',
-		preco: { mensal: 'R$ 0', anual: 'R$ 0' },
-		unidade: 'para sempre',
+		id: 'basico',
+		nome: NOME_DO_PLANO.basico,
+		para: 'para começar a dar aula',
+		icone: 'person',
+		preco: { mensal: 'R$ 29', anual: 'R$ 24' },
+		unidade: 'por mês',
 		nota: {
-			mensal: 'Sem cartão. Você monta uma atividade por mês e ela fica no ar sem prazo.',
-			anual: 'Sem cartão. Você monta uma atividade por mês e ela fica no ar sem prazo.'
+			mensal: `Começa com ${TRIAL.dias} dias de teste. Tudo menos a IA.`,
+			anual: 'R$ 290 por ano, cobrados de uma vez. Equivale a dez meses.'
 		},
 		listaTitulo: 'O que você pode fazer',
-		recursos: [
-			{ label: '1 atividade nova por mês', incluso: true },
-			{ label: 'Turmas e convites por e-mail sem limite', incluso: true },
-			{ label: 'Resultados por aluno e por questão', incluso: true },
-			{ label: 'Materiais gerados com IA', incluso: false },
-			{ label: 'Questões de escuta com áudio', incluso: false }
-		],
-		cta: 'Começar sem cartão',
-		ctaNota: 'Dá para subir de plano depois sem perder nada do que você já criou.'
+		recursos: [...limites('basico'), ...COMUM],
+		cta: 'Assinar o Básico',
+		ctaNota: 'A equipe confirma o pagamento e ativa o plano.'
 	},
 	{
-		id: 'professor',
-		nome: 'Professor',
+		id: 'pro',
+		nome: NOME_DO_PLANO.pro,
 		para: 'para quem dá aula toda semana',
-		icone: 'person',
-		preco: { mensal: 'R$ 39', anual: 'R$ 32,50' },
+		icone: 'spark',
+		preco: { mensal: 'R$ 49', anual: 'R$ 41' },
 		unidade: 'por mês',
 		nota: {
 			mensal: 'Cobrado mensalmente. Cancela quando quiser, sem multa.',
-			anual: 'R$ 390 por ano, cobrados de uma vez. Equivale a dez meses.'
+			anual: 'R$ 490 por ano, cobrados de uma vez. Equivale a dez meses.'
 		},
-		listaTitulo: 'Tudo do Livre, mais',
-		recursos: [
-			{ label: 'Atividades ilimitadas', incluso: true },
-			{ label: 'Materiais com IA: prompt, imagem ou vídeo', incluso: true },
-			{ label: 'Áudio gerado para questões de escuta', incluso: true },
-			{ label: 'Biblioteca de materiais reaproveitáveis', incluso: true },
-			{ label: 'Correção automática com nota parcial', incluso: true }
-		],
-		cta: 'Assinar o Professor',
-		// A duração do trial é pendência (billing.md): a frase fica reservada.
-		ctaNota: 'Período de teste antes da primeira cobrança.',
+		listaTitulo: 'Tudo do Básico, mais',
+		recursos: [...limites('pro'), ...COMUM],
+		cta: 'Assinar o Pro',
+		ctaNota: 'A equipe confirma o pagamento e ativa o plano.',
 		destaque: 'O mais escolhido'
 	},
 	{
-		id: 'escola',
-		nome: 'Escola',
-		para: 'para um grupo de professores',
-		icone: 'school',
-		preco: { mensal: 'R$ 29', anual: 'R$ 24' },
-		unidade: 'por professor / mês',
+		id: 'super',
+		nome: NOME_DO_PLANO.super,
+		para: 'para várias turmas e idiomas',
+		icone: 'bolt',
+		preco: { mensal: 'R$ 89', anual: 'R$ 74' },
+		unidade: 'por mês',
 		nota: {
-			mensal: 'A partir de 5 professores. Uma fatura só, no nome da escola.',
-			anual: 'A partir de 5 professores. Uma fatura só, no nome da escola.'
+			mensal: 'Cobrado mensalmente. Cancela quando quiser, sem multa.',
+			anual: 'R$ 890 por ano, cobrados de uma vez. Equivale a dez meses.'
 		},
-		listaTitulo: 'Tudo do Professor, mais',
+		listaTitulo: 'Tudo do Pro, mais',
+		recursos: [...limites('super'), ...COMUM],
+		cta: 'Assinar o Super',
+		ctaNota: 'A equipe confirma o pagamento e ativa o plano.'
+	},
+	{
+		id: 'scholar',
+		nome: NOME_DO_PLANO.scholar,
+		para: 'para escolas e redes',
+		icone: 'school',
+		preco: { mensal: 'Sob proposta', anual: 'Sob proposta' },
+		unidade: 'por contrato',
+		nota: {
+			mensal: 'Limites personalizados por escola e por professor. Uma fatura só.',
+			anual: 'Limites personalizados por escola e por professor. Uma fatura só.'
+		},
+		listaTitulo: 'Para a escola',
 		recursos: [
-			{ label: 'Materiais compartilhados entre professores', incluso: true },
-			{ label: 'Turmas visíveis para a coordenação', incluso: true },
-			{ label: 'Uma fatura só, com nota fiscal', incluso: true },
-			{ label: 'Entrada de alunos em lote', incluso: true },
-			{ label: 'Suporte por e-mail em até um dia útil', incluso: true }
+			{ label: 'Limites definidos no contrato', incluso: true },
+			{ label: 'Professores convidados pela coordenação', incluso: true },
+			{ label: 'Painel da coordenação com o uso de cada professor', incluso: true },
+			{ label: 'Números por turma, sem expor nome de aluno', incluso: true },
+			{ label: 'Uma fatura só, no nome da escola', incluso: true }
 		],
 		cta: 'Falar sobre a escola',
-		ctaNota: 'A gente responde com uma proposta pelo número de professores.'
+		ctaNota: 'A gente responde com uma proposta pelo número de professores.',
+		porContrato: true
 	}
 ];
 
@@ -130,23 +155,22 @@ export const planos: readonly Plano[] = [
 export const garantias: readonly string[] = [
 	'Cancela quando quiser',
 	'Links publicados nunca saem do ar',
-	'Nota fiscal em todos os planos'
+	'Nada é apagado quando o plano vence'
 ];
 
 export const tituloPadrao = 'Um preço por professor, sem cobrar do aluno';
 export const ledePadrao =
-	'O que muda entre os planos é quanto você cria e quanto a IA te ajuda. O que os alunos veem é igual nos três.';
+	'O que muda entre os planos é quanto você guarda e quanto a IA te ajuda. O que os alunos veem é igual em todos.';
 
 /**
  * A promessa que vale em qualquer plano, e que é desenho de produto e não
- * cortesia: a cobrança mexe no lado do PROFESSOR. Está aqui porque a home e a
- * tela de planos dizem a mesma coisa — e porque é a regra que `can()` implementa
- * (billing.md "Degradação, não desligamento").
+ * cortesia: a cobrança mexe no lado do PROFESSOR. É a regra que `can()`
+ * implementa (billing.md "Degradação, não desligamento").
  */
 export const alunoNaoPaga = {
 	titulo: 'O aluno nunca paga, nem precisa de conta',
 	texto:
-		'Em qualquer plano, quem responde entra pelo link, pelo QR ou pelo código. Se a sua cobrança atrasar, as atividades já publicadas continuam abrindo e recebendo respostas — o que trava é criar e publicar, do seu lado.'
+		'Em qualquer plano, quem responde entra pelo link, pelo QR ou pelo código. Se o seu plano vencer, as atividades já publicadas continuam abrindo e recebendo respostas — o que pausa é criar e publicar, do seu lado.'
 };
 
 /** No anual, dois meses saem de graça — o selo ao lado do seletor de ciclo. */

@@ -57,7 +57,11 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 			title: activityVersion.activity.title,
 			itemCount: items.length
 		},
-		student: { name: attempt.name, initials: initials || '?' },
+		student: {
+			name: attempt.name,
+			initials: initials || '?',
+			avatar: attempt.account?.avatar ?? null
+		},
 		attemptId: attempt.id,
 		itemId: item.id,
 		item: buildRuntimeItem(item, attempt.seed, audioUrlByHash),

@@ -1,5 +1,11 @@
 # Mapa de páginas — entendo
 
+> **Documento HISTÓRICO** (setembro de 2026): foi o briefing para o Claude Design desenhar as telas.
+> Ele usa nomes que já mudaram — `(marketing)` virou `(site)`, `dashboard` e `correcao` não existem,
+> `assinatura` virou uma aba de `conta` — e não tem turmas, alunos, módulos, escola nem o painel
+> interno. **O mapa vigente é `.claude/rules/paginas.md`**; as decisões, os ADRs desta pasta. O
+> "Apêndice A" citado lá está resolvido em boa parte pelo `docs/adr-002-billing.md`.
+
 Inventário de todas as telas que o produto precisa, derivado de `CLAUDE.md` e de
 `.claude/rules/{kernel,server,auth,billing,db,design-system,components,home,testing}.md`. Não
 inventa fluxo: cada página aqui existe porque uma regra, uma entidade de banco ou uma remote

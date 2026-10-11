@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
+	import Avatar from '$lib/components/Avatar.svelte';
 	// Uma questão. A correção acontece NO SERVIDOR (regra inviolável 2) — o estado
 	// "Verificando…" existe de verdade, nada de veredito otimista no cliente.
 	//
@@ -80,7 +81,7 @@
 	interface PageData {
 		index: number;
 		activity: { slug: string; title: string; itemCount: number };
-		student: { name: string; initials: string };
+		student: { name: string; initials: string; avatar: string | null };
 		attemptId: string;
 		itemId: string;
 		item: PlayerItem;
@@ -99,7 +100,7 @@
 			title: 'Present perfect — turma B',
 			itemCount: 24
 		},
-		student: { name: 'João M.', initials: 'JM' },
+		student: { name: 'João M.', initials: 'JM', avatar: null },
 		attemptId: 'att_demo',
 		itemId: 'itm_demo',
 		item: {
@@ -676,11 +677,7 @@
 	<span
 		class="hidden items-center gap-2 text-[12.5px] whitespace-nowrap text-base-content/65 lg:flex"
 	>
-		<span
-			class="grid size-[26px] place-items-center rounded-full bg-base-300 text-[10.5px] font-bold text-primary"
-		>
-			{data.student.initials}
-		</span>
+		<Avatar codigo={data.student.avatar} nome={data.student.name} size={26} radius="rounded-full" />
 		{data.student.name}
 	</span>
 </header>

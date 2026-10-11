@@ -29,6 +29,34 @@ Nenhum tipo novo entra sem estes quatro:
 Todo repositório precisa de um teste provando que ele **não** devolve dado de outro professor.
 É a regra inviolável nº 4, e é o cenário de vazamento mais provável do produto.
 
+Vale também para LEITURA que junta várias áreas: o início do Studio (`server/inicio/painel.test.ts`)
+procura o nome da aluna, o título da atividade e o nome da turma do outro professor no JSON
+INTEIRO, não só nas contagens — é a tela onde um `teacherId` esquecido apareceria primeiro.
+
+## Obrigatório em cota, crédito e acesso
+
+O que protege dinheiro e acesso tem teste contra o banco, não só unitário:
+
+- **Corrida na última vaga**: duas criações simultâneas com uma vaga — exatamente uma passa
+  (`billing/cota.test.ts`). Vale para assento de escola também (`escola/escola.test.ts`).
+- **Programação de envio de módulo**: a conta das datas é pura e tem os casos de calendário
+  (`modulos/programacao.test.ts`: toda quinta, duas por vez, dia 31 no mês curto, agenda atrasada
+  recomeçando de hoje, fuso de Brasília); o envio, contra o banco (`repos/modules.test.ts`): alocar
+  confere as duas pontas, outro professor não programa, "tudo agora" manda um e-mail por aluno só
+  com o que está no ar, processar de novo não manda nada duas vezes, e o futuro não sai antes. A
+  AGENDA (calendário e "próximos 7 dias") tem a parte pura em `modulos/agenda.test.ts` (dia e hora
+  de Brasília, um cartão por turma por dia, mês começando na segunda) e a do banco no mesmo
+  `modules.test.ts`: outro professor não lê, programação pausada some, o que saiu fica no dia em
+  que saiu, e duplicar não leva turma. E o "só disponibilizar": sai sem nenhum `convite-modulo` na
+  fila, com `porEmail` falso, convite até para o aluno sem e-mail, e fora do teto do dia.
+- **Créditos**: débitos simultâneos nunca passam do saldo, o mesmo `requestId` debita uma vez, e falha
+  do provedor estorna tudo (`ia/gerar.test.ts`, com provedor FALSO — o Gemini de verdade não entra em
+  teste).
+- **Campos de cobrança** não vêm do corpo do cadastro nem de `update-user` (`auth/campos.test.ts`).
+- **Leituras entre professores** não carregam dado de aluno: o painel (`admin.test.ts`) e a
+  coordenação (`escola.test.ts`) são conferidos procurando o nome e a resposta da aluna no JSON.
+- A matriz de situações de `entitlements.ts` (trial, carência, cancelada, escola) é unitária e pura.
+
 ## Geradores
 
 Gerador é função pura: mesmo `ContentUnit` e mesmo `LanguageProfile` produzem o mesmo `Item[]`.

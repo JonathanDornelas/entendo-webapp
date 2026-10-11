@@ -13,6 +13,7 @@
 	 * consulta por letra sem nenhum ganho.
 	 */
 	import { goto } from '$app/navigation';
+	import IdiomaTag from './IdiomaTag.svelte';
 	import { resolve } from '$app/paths';
 	import Loading from '$lib/components/Loading.svelte';
 	import {
@@ -230,6 +231,7 @@
 									</span>
 									<span class="block truncate text-[12px] text-base-content/65">{r.detalhe}</span>
 								</span>
+								{#if r.idioma}<IdiomaTag tag={r.idioma} compacta />{/if}
 								<!-- A categoria vai escrita: "Present perfect" pode ser uma
 								     atividade e um material ao mesmo tempo. -->
 								<span

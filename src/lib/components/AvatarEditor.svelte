@@ -49,11 +49,35 @@
 		if (!dialogo) return;
 		if (aberto && !dialogo.open) {
 			comoEstava = codigo;
+			fechando = false;
 			dialogo.showModal();
-		} else if (!aberto && dialogo.open) {
-			dialogo.close();
+		} else if (!aberto && dialogo.open && !fechando) {
+			fecharComSaida(dialogo);
 		}
 	});
+
+	/**
+	 * Fechar ANIMA antes de fechar: o `close()` nativo some com o diálogo e o
+	 * véu no mesmo quadro, e a tela parecia piscar. A saída (180 ms) roda com o
+	 * diálogo ainda aberto; o `close()` vem no fim dela. O `setTimeout` é a rede
+	 * para quando a animação não roda e o `animationend` nunca chega.
+	 */
+	let fechando = $state(false);
+	function fecharComSaida(el: HTMLDialogElement) {
+		fechando = true;
+		const terminar = () => {
+			if (!fechando) return;
+			fechando = false;
+			if (!aberto && el.open) el.close();
+		};
+		el.addEventListener('animationend', terminar, { once: true });
+		setTimeout(terminar, 260);
+	}
+	const animacao = $derived(
+		fechando
+			? 'animate-[en-modal-out_180ms_ease-in_both] backdrop:animate-[en-veu-out_180ms_ease-in_both]'
+			: 'open:animate-[en-fade-up_300ms_var(--ease-out-soft)_both] backdrop:animate-[en-veu_240ms_var(--ease-out-soft)_both]'
+	);
 
 	const atual = $derived<Categoria>(
 		CATEGORIAS.find((c) => c.chave === categoria) ?? (CATEGORIAS[1] as Categoria)
@@ -108,18 +132,26 @@
 	}
 </script>
 
-<!-- O `close` nativo cobre Escape e o clique no backdrop: os dois têm que
-     devolver o avatar como estava, senão "fechar sem querer" grava a mudança. -->
+<!-- Escape (o `cancel` nativo, com o fechar imediato impedido para a saída
+     animar) e o clique no véu (o clique cai no próprio `<dialog>`, fora do
+     conteúdo) devolvem o avatar como estava — senão "fechar sem querer" grava
+     a mudança. O véu é o `overlay`, preto nos dois temas. -->
 <dialog
 	bind:this={dialogo}
 	onclose={() => {
 		if (aberto) cancelar();
 	}}
-	oncancel={cancelar}
+	oncancel={(e) => {
+		e.preventDefault();
+		cancelar();
+	}}
+	onclick={(e) => {
+		if (e.target === dialogo) cancelar();
+	}}
 	aria-labelledby="avatar-editor-titulo"
 	class="m-auto max-h-[calc(100dvh-1.75rem)] w-[calc(100vw-1.75rem)] max-w-[880px] overflow-hidden rounded-box border border-line bg-base-100 p-0 text-base-content
-	       shadow-[0_34px_70px_-34px_rgba(20,18,31,0.55)] backdrop:bg-bezel/55 backdrop:backdrop-blur-[3px]
-	       open:animate-[en-fade-up_300ms_var(--ease-out-soft)_both] lg:max-h-[min(720px,calc(100dvh-3.75rem))]"
+	       shadow-[0_34px_70px_-34px_rgba(20,18,31,0.55)] backdrop:bg-overlay backdrop:backdrop-blur-[3px]
+	       {animacao} lg:max-h-[min(720px,calc(100dvh-3.75rem))]"
 >
 	<div class="flex max-h-[inherit] flex-col">
 		<div class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3.5 lg:px-[22px]">

@@ -8,6 +8,7 @@
 	// histórico só tem o que está LIGADO a ele. Responder pelo link aberto sem
 	// abrir o link pessoal é o caminho normal e essas respostas não têm dono.
 	import { resolve } from '$app/paths';
+	import Avatar from '$lib/components/Avatar.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { withMock } from '$lib/dev/with-mock';
 	import HeaderCard from '$lib/components/HeaderCard.svelte';
@@ -32,6 +33,7 @@
 			id: string;
 			name: string;
 			initials: string;
+			avatar: string | null;
 			email: string | null;
 			createdAt: string;
 			/** O último convite dele, para reenviar só para ele. */
@@ -51,6 +53,7 @@
 			id: 'alu_01',
 			name: 'Juliana Pereira',
 			initials: 'JP',
+			avatar: null,
 			email: 'juliana@escola.br',
 			createdAt: '4 de março',
 			inviteId: 'cnv_01',
@@ -108,7 +111,7 @@
 
 <svelte:head><title>{data.student.name} — entendo</title></svelte:head>
 
-<div class="px-gutter py-gutter-sm">
+<div class="pagina-studio">
 	<a
 		href={data.classroom
 			? resolve('/(studio)/turmas/[id]', { id: data.classroom.id })
@@ -143,10 +146,13 @@
 		]}
 	>
 		{#snippet badge()}
-			<span
-				class="grid size-[46px] shrink-0 place-items-center rounded-[13px] bg-base-300 text-[15px] font-bold text-primary"
-				>{data.student.initials}</span
-			>
+			<Avatar
+				codigo={data.student.avatar}
+				nome={data.student.name}
+				size={46}
+				radius="rounded-[13px]"
+				class="shrink-0"
+			/>
 		{/snippet}
 		<h1 class="mb-1.5 font-display text-[22px] font-semibold tracking-[-0.024em] lg:text-[28px]">
 			{data.student.name}

@@ -275,3 +275,28 @@ export function sortearCodigo(rnd: () => number = Math.random): string {
 	const segundoAcessorio = rnd() < 0.3 ? 1 + Math.floor(rnd() * (ACESSORIOS.length - 1)) : 0;
 	return [...casas, segundoAcessorio, 0].join('-');
 }
+
+/**
+ * O avatar de quem ainda não tem um gravado — a conta antiga que nunca abriu o
+ * editor e o aluno da chamada que não tem conta. **Ninguém aparece como
+ * iniciais**: é um sorteio com o NOME como semente, então a mesma pessoa tem o
+ * mesmo rosto em toda tela, em todo aparelho, sem gravar nada.
+ *
+ * A semente passa por NFC (regra inviolável nº 6): "José" composto e
+ * pré-composto não podem virar dois rostos. Conta nova já nasce com um avatar
+ * gravado (o hook de cadastro das duas instâncias de auth), e é ele que vale.
+ */
+export function avatarPadrao(semente: string): string {
+	let h = 2166136261;
+	for (const caractere of semente.normalize('NFC').trim()) {
+		h ^= caractere.codePointAt(0) ?? 0;
+		h = Math.imul(h, 16777619);
+	}
+	let estado = h >>> 0;
+	return sortearCodigo(() => {
+		estado = (estado + 0x6d2b79f5) | 0;
+		let t = Math.imul(estado ^ (estado >>> 15), 1 | estado);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	});
+}

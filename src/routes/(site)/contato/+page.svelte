@@ -5,7 +5,13 @@
 	import SiteHero from '$lib/components/SiteHero.svelte';
 	import { canais, empresa } from '$lib/content/institucional';
 
-	let { form }: { form?: { ok?: boolean; error?: string } } = $props();
+	let {
+		data,
+		form
+	}: {
+		data: { assunto: string; assuntos: string[] };
+		form?: { ok?: boolean; error?: string } | null;
+	} = $props();
 </script>
 
 <svelte:head><title>Contato — entendo</title></svelte:head>
@@ -33,9 +39,21 @@
 			>
 				Mensagem enviada. Você recebe a resposta no e-mail informado.
 			</p>
+		{:else if form?.error}
+			<p
+				class="mb-5 rounded-box border border-error/35 bg-error/6 px-4 py-3.5 text-sm text-error"
+				role="alert"
+			>
+				{form.error}
+			</p>
 		{/if}
 
 		<form method="POST" class="grid gap-4">
+			<!-- Campo-isca: fora da tela e do leitor de tela. Gente não preenche;
+			     robô preenche tudo — e aí a mensagem não vira e-mail. -->
+			<div class="absolute -start-[9999px] h-px w-px overflow-hidden" aria-hidden="true">
+				<label>Site <input name="site" tabindex="-1" autocomplete="off" /></label>
+			</div>
 			<div class="grid gap-4 sm:grid-cols-2">
 				<label class="block min-w-0">
 					<span class="mb-1.5 block text-[13px] font-semibold">Nome</span>
@@ -55,13 +73,12 @@
 
 			<label class="block">
 				<span class="mb-1.5 block text-[13px] font-semibold">Assunto</span>
-				<select name="assunto" class="select w-full">
-					<option>Dúvida sobre a plataforma</option>
-					<option>Problema técnico</option>
-					<option>Urgente — turma em aula</option>
-					<option>Escolas e redes</option>
-					<option>Privacidade e dados</option>
-					<option>Imprensa</option>
+				<!-- A lista vem do servidor, que valida contra ela; `?assunto=escolas`
+				     (o "Falar sobre a escola" dos planos) já chega escolhido. -->
+				<select name="assunto" class="select w-full" value={data.assunto}>
+					{#each data.assuntos as assunto (assunto)}
+						<option>{assunto}</option>
+					{/each}
 				</select>
 			</label>
 

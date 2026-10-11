@@ -5,6 +5,12 @@ import { requireTeacher } from '$lib/server/auth/guard';
 import { materiais } from '$lib/server/db/repos/content-units';
 import { camposMaterial, montarMaterial } from '$lib/server/atividades/material-form';
 import { parseRawMaterial } from '$lib/kernel/content/parse-raw';
+import { campoIdioma } from '$lib/idiomas';
+import {
+	MAX_LINHAS_POR_LOTE,
+	avisoDeLimite,
+	gravarMateriais
+} from '$lib/server/atividades/gravar-materiais';
 
 /**
  * A biblioteca avulsa — material que existe fora de qualquer atividade.
@@ -29,20 +35,27 @@ export const criarMaterial = form(z.object(camposMaterial), async (campos) => {
 
 	// Igual ao que já existe? Reaproveita — a biblioteca é do professor, e duas
 	// linhas com a mesma frase são duas coisas para ele manter em dia sem
-	// ganhar nada.
-	const equivalente = await materiais(teacher).findEquivalent(campos.kind, montado.dados);
-	if (equivalente) return { ok: true as const, id: equivalente, reused: true };
-
-	const criado = await materiais(teacher).create(campos.kind, montado.dados);
-	return { ok: true as const, id: criado.id, reused: false };
+	// ganhar nada. O novo respeita o estoque do plano (`gravarMateriais`).
+	const r = await gravarMateriais(teacher, {
+		kind: campos.kind,
+		unidades: [montado.dados],
+		idioma: campos.idioma
+	});
+	if (r.foraDoLimite > 0) {
+		return {
+			ok: false as const,
+			error: avisoDeLimite(r) ?? 'Não coube no plano.',
+			motivo: r.motivo
+		};
+	}
+	return { ok: true as const, id: r.ids[0], reused: r.reaproveitados > 0 };
 });
 
 /** Colar uma lista direto na biblioteca — mesmo parser da etapa 2. */
 export const criarMateriaisEmLote = form(
-	z.object({ kind: z.enum(['SentencePair', 'VocabItem']), raw: z.string() }),
-	async ({ kind, raw }) => {
+	z.object({ kind: z.enum(['SentencePair', 'VocabItem']), raw: z.string(), idioma: campoIdioma }),
+	async ({ kind, raw, idioma }) => {
 		const teacher = teacherOf();
-		const repo = materiais(teacher);
 
 		const linhas = raw.split('\n').filter((linha) => linha.trim()).length;
 		const unidades = parseRawMaterial(kind, raw);
@@ -53,21 +66,26 @@ export const criarMateriaisEmLote = form(
 			};
 		}
 
-		let criados = 0;
-		let reaproveitados = 0;
-		for (const dados of unidades) {
-			if (await repo.findEquivalent(kind, dados)) {
-				reaproveitados++;
-				continue;
-			}
-			await repo.create(kind, dados);
-			criados++;
+		if (unidades.length > MAX_LINHAS_POR_LOTE) {
+			return { ok: false as const, error: `Cole até ${MAX_LINHAS_POR_LOTE} linhas por vez.` };
+		}
+
+		const r = await gravarMateriais(teacher, { kind, unidades, idioma });
+		if (r.criados === 0 && r.reaproveitados === 0) {
+			return {
+				ok: false as const,
+				error: avisoDeLimite(r) ?? 'Nada coube no plano.',
+				motivo: r.motivo
+			};
 		}
 		return {
 			ok: true as const,
-			added: criados,
-			reused: reaproveitados,
-			ignored: linhas - unidades.length
+			added: r.criados,
+			reused: r.reaproveitados,
+			ignored: linhas - unidades.length,
+			foraDoLimite: r.foraDoLimite,
+			aviso: avisoDeLimite(r),
+			motivo: r.motivo
 		};
 	}
 );
@@ -79,7 +97,12 @@ export const atualizarMaterial = form(
 		const montado = montarMaterial(campos);
 		if ('error' in montado) return { ok: false as const, error: montado.error };
 
-		const atualizado = await materiais(teacher).update(contentId, campos.kind, montado.dados);
+		const atualizado = await materiais(teacher).update(
+			contentId,
+			campos.kind,
+			montado.dados,
+			campos.idioma
+		);
 		if (!atualizado) error(404, 'Material não encontrado');
 		return { ok: true as const };
 	}

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { CORES_DE_ETIQUETA } from '$lib/etiquetas';
+import { nivelOuNulo } from '$lib/atividades/nivel';
 import { command, form, getRequestEvent, query } from '$app/server';
 import { error, redirect } from '@sveltejs/kit';
 import { resolve } from '$app/paths';
@@ -11,7 +13,8 @@ import { itemAudioHashes } from '$lib/server/player/runtime';
 import { enfileirarAudioFaltante } from '$lib/server/tts/enfileirar';
 import { publicationSettingsSchema } from '$lib/server/player/settings';
 import { enqueueConvites, type ConviteJob } from '$lib/server/queue';
-import { labelForTag, tagForLabel } from '$lib/kernel/language/profiles';
+import { labelForTag, languageLabels } from '$lib/kernel/language/profiles';
+import { campoIdioma } from '$lib/idiomas';
 import { alunosValidos, parseAlunos } from '$lib/turmas/parse-alunos';
 
 /**
@@ -24,7 +27,8 @@ function teacherOf() {
 	return requireTeacher(getRequestEvent().locals);
 }
 
-const CORES = ['violeta', 'teal', 'azul', 'magenta', 'ardosia'] as const;
+// A paleta é a mesma dos módulos — `$lib/etiquetas.ts`.
+const CORES = CORES_DE_ETIQUETA;
 
 const alunoSchema = z.object({ name: z.string().min(1), email: z.string().nullable() });
 
@@ -60,7 +64,8 @@ export const criarTurma = form(
 
 		const turma = await turmas(teacher).create(
 			name.trim(),
-			languageLabel ? tagForLabel(languageLabel) : null,
+			// Rótulo que não é idioma do produto vira "sem idioma", não erro 500.
+			(languageLabel && languageLabels[languageLabel]) || null,
 			color,
 			lista
 		);
@@ -68,18 +73,24 @@ export const criarTurma = form(
 	}
 );
 
+/**
+ * Editar nome, idioma e cor. O idioma chega como TAG, de um seletor
+ * (`campoIdioma`): era um campo de texto livre que passava por `tagForLabel`, e
+ * qualquer rótulo que não fosse exatamente "Inglês (EUA)" estourava em 500 —
+ * o professor clicava em salvar e nada acontecia.
+ */
 export const editarTurma = form(
 	z.object({
 		classroomId: z.string(),
-		name: z.string().min(1, 'Dê um nome para a turma'),
-		languageLabel: z.string().optional(),
+		name: z.string().trim().min(1, 'Dê um nome para a turma.').max(80),
+		idioma: campoIdioma,
 		color: z.enum(CORES).default('violeta')
 	}),
-	async ({ classroomId, name, languageLabel, color }) => {
+	async ({ classroomId, name, idioma, color }) => {
 		const teacher = teacherOf();
 		const ok = await turmas(teacher).update(classroomId, {
-			name: name.trim(),
-			languageTag: languageLabel ? tagForLabel(languageLabel) : null,
+			name,
+			languageTag: idioma,
 			color
 		});
 		if (!ok) error(404, 'Turma não encontrada');
@@ -164,6 +175,9 @@ export const atividadesPublicadas = query(async () => {
 	const lista = await atividades(teacher).list();
 
 	return lista.flatMap((activity) => {
+		// Arquivada tem o link fechado para quem não começou: oferecê-la aqui
+		// seria mandar a turma para uma porta fechada.
+		if (activity.archivedAt) return [];
 		const versao = activity.versions.find((v) => v.publications.length > 0);
 		const publicacao = versao?.publications.at(-1);
 		if (!versao || !publicacao) return [];
@@ -173,6 +187,8 @@ export const atividadesPublicadas = query(async () => {
 				title: activity.title,
 				itemCount: versao.items.length,
 				languageLabel: labelForTag(activity.targetLang),
+				idioma: activity.targetLang,
+				level: nivelOuNulo(activity.level),
 				slug: publicacao.slug,
 				attempts: publicacao._count.attempts
 			}
@@ -195,6 +211,9 @@ export const enviarParaTurmas = command(
 
 		const activity = await atividades(teacher).byId(activityId);
 		if (!activity) error(404, 'Atividade não encontrada');
+		if (activity.archivedAt) {
+			return { ok: false, error: 'Esta atividade está arquivada. Desarquive para enviar.' };
+		}
 
 		const published = await atividades(teacher).published(activityId);
 		const publication = published?.publications.at(-1);
@@ -312,6 +331,9 @@ export const reenviarNaoAbertos = command(
 	z.object({ deliveryId: z.string() }),
 	async ({ deliveryId }) => {
 		const teacher = teacherOf();
+		if (await envios(teacher).arquivado({ deliveryId })) {
+			return { ok: false, reenviados: 0, error: 'Esta atividade está arquivada.' };
+		}
 		const renovados = await envios(teacher).renewUnopened(deliveryId);
 		const jobs = jobsDeReenvio(teacher.name, renovados);
 		await enqueueConvites(jobs);
@@ -326,6 +348,9 @@ export const reenviarNaoAbertos = command(
  */
 export const reenviarConvite = command(z.object({ inviteId: z.string() }), async ({ inviteId }) => {
 	const teacher = teacherOf();
+	if (await envios(teacher).arquivado({ inviteId })) {
+		return { ok: false, error: 'Esta atividade está arquivada.' };
+	}
 	const renovado = await envios(teacher).renewOne(inviteId);
 	if (!renovado) error(404, 'Convite não encontrado');
 	if (!renovado.student.email) {

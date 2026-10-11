@@ -53,6 +53,7 @@ nunca aparecem como decoração, gradiente ou destaque de marca.
 | Superfícies        | `base-100/200/300` | #FFFFFF / #F5F4FB / #E7E3F7 | #14121F / #1D1A2C / #292540 |
 | Borda de cartão    | `line`             | #E2DEF2                     | #332E4D                     |
 | Superfície de card | `card`             | #FFFFFF                     | #1A1729                     |
+| Véu de modal       | `overlay`          | preto a 55%                 | preto a 55%                 |
 
 `line` é a borda de cartão, campo e divisor — **não** `base-300`, que é preenchimento (trilha de
 progresso, chip). `card` é a superfície de um cartão — no claro é igual a `base-100`, no escuro
@@ -101,6 +102,13 @@ próprio. Ver as seis composições em `/dev/components#player`.
   (`[data-content-lang]` no `app.css`).
 - `font-mono` **JetBrains Mono** — slugs, IPA, código.
 
+**A exceção, e a única: `font-pixel` (Silkscreen), decorativa.** Existe só no mapa do módulo do
+aluno (`MapaDoModulo.svelte`, tema de jogo em 8 bits), nos rótulos "MUNDO 1" e "FASE 3" — sempre
+`aria-hidden` e ao lado do texto de verdade em Plus Jakarta Sans. Nunca corpo de texto, nunca
+título, nunca conteúdo do idioma alvo (esse é sempre Noto Sans). O mesmo tema traz pixel art como
+DADO (`$lib/modulos/pixel.ts`, grade de letras virando `path` com `crispEdges` e cor por token), e
+os movimentos dele usam `steps()` em vez de curva — rodando uma vez só, como manda "Movimento".
+
 Escala: display 56 / title 32 / content 22 (mínimo 20 no Player) / body 16 / label 12 caixa alta.
 
 **Os tamanhos grandes são FLUIDOS, não um par de px por breakpoint.** `text-display`,
@@ -135,6 +143,19 @@ alvo de toque de 48px. Todo ícone que carrega significado vem com texto ao lado
 
 Ilustração é conteúdo, não decoração: imagem otimizada com `width`/`height` fixos. Não desenhe
 SVG ilustrativo à mão.
+
+## Largura das telas do Studio
+
+**Toda tela do painel usa o mesmo invólucro, `pagina-studio`** (`@utility` em `app.css`): largura
+INTEIRA do `<main>`, 16px de respiro no celular e 28px no desktop. Nada de `max-w-[…] mx-auto` na
+página — cada tela tinha a sua medida e trocar de aba fazia o conteúdo pular. Leitura confortável
+é responsabilidade do PARÁGRAFO (`max-w-[60ch]`), e formulário largo demais se resolve com
+COLUNAS — na Conta, o formulário ao lado das ações, e campos curtos lado a lado —, nunca
+estreitando a página. Blocos que se repetem (o uso da assinatura) dividem a linha com
+`grid-cols-[repeat(auto-fit,minmax(13rem,1fr))]`: três cabem lado a lado, nenhum fica sozinho pela
+metade. Telas de cabeçalho próprio (Resultados) alinham o cabeçalho pelo mesmo respiro
+(`px-4 lg:px-7`). As telas de TAREFA ÚNICA fora do painel (wizard, nova turma, prévia) continuam
+com a coluna focada delas: ali o estreitamento é a intenção.
 
 ## Dois contextos, dois orçamentos
 
@@ -171,6 +192,7 @@ Só `transform` e `opacity`. Nenhuma biblioteca de animação — os keyframes `
 | Gravação, skeleton | infinito  | ease-in-out                                                         |
 | Entrada em scroll  | 560ms     | `--ease-out-soft` (`reveal-row`, stagger de 70ms em até 4 itens)    |
 | Teclado virtual    | 300/190ms | `--ease-out-soft` entra, `ease-in` sai (`teclado-in`/`teclado-out`) |
+| Modal, painel      | 300/200ms | desacelera entra, acelera sai (`$lib/client/transicoes.ts`)         |
 
 **Troca de questão**: a questão SAI antes de a próxima entrar — sem esse intervalo a troca era um
 corte seco, porque `/q/1` e `/q/2` são a mesma rota e o componente só re-renderizava com outro

@@ -108,6 +108,9 @@ export async function tentativaDoProfessor(teacherId: string, attemptId: string)
 		where: { id: attemptId, publication: { activityVersion: { activity: { teacherId } } } },
 		include: {
 			items: { orderBy: { createdAt: 'asc' } },
+			// O avatar de quem respondeu: da conta logada, ou da conta ligada à ficha.
+			account: { select: { avatar: true } },
+			student: { select: { account: { select: { avatar: true } } } },
 			publication: {
 				include: {
 					activityVersion: {
@@ -188,6 +191,7 @@ export async function tentativaDoProfessor(teacherId: string, attemptId: string)
 			id: attempt.id,
 			name: attempt.name,
 			initials: iniciais(attempt.name),
+			avatar: attempt.account?.avatar ?? attempt.student?.account?.avatar ?? null,
 			when: quando(attempt.startedAt),
 			duration: duracao(attempt.startedAt, attempt.finishedAt),
 			studentId: attempt.studentId

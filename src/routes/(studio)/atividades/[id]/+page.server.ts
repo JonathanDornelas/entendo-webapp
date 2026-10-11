@@ -1,6 +1,9 @@
 import { error } from '@sveltejs/kit';
 import { toDataURL } from 'qrcode';
 import type { PageServerLoad } from './$types';
+import { nivelOuNulo } from '$lib/atividades/nivel';
+import { modulos } from '$lib/server/db/repos/modules';
+import { corOuPadrao } from '$lib/etiquetas';
 import { requireTeacher } from '$lib/server/auth/guard';
 import { atividades } from '$lib/server/db/repos/activities';
 import { envios } from '$lib/server/db/repos/deliveries';
@@ -49,10 +52,12 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 	const activity = await atividades(teacher).byId(params.id);
 	if (!activity) error(404, 'Atividade não encontrada');
 
-	const [draft, published, deliveries] = await Promise.all([
+	const [draft, published, deliveries, seusModulos, todosModulos] = await Promise.all([
 		atividades(teacher).draft(params.id),
 		atividades(teacher).published(params.id),
-		envios(teacher).porAtividade(params.id)
+		envios(teacher).porAtividade(params.id),
+		modulos(teacher).porAtividade(params.id),
+		modulos(teacher).nomes()
 	]);
 
 	// A versão que o aluno veria agora. Sem publicação, o rascunho — é o que
@@ -124,11 +129,23 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 			id: activity.id,
 			title: activity.title,
 			targetLang: labelForTag(activity.targetLang),
+			/** A tag de idioma (`$lib/idiomas.ts`) — o chip do cabeçalho. */
+			idioma: activity.targetLang,
 			sourceLang: labelForTag(activity.sourceLang),
 			// Criada em DATA, editada há QUANTO TEMPO: a primeira responde "de que
 			// semestre é isto", a segunda "alguém mexeu depois de publicar".
 			createdAt: activity.createdAt.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' }),
-			updatedAt: haQuantoTempo(activity.updatedAt)
+			updatedAt: haQuantoTempo(activity.updatedAt),
+			// Arquivada: fora do estoque do plano e com o link fechado para quem não
+			// começou (docs/adr-002-billing.md). A tela oferece desarquivar.
+			arquivada: activity.archivedAt !== null,
+			// O nível (CEFR) é rótulo, não versão: troca na hora, sem publicar.
+			level: nivelOuNulo(activity.level)
+		},
+		// Os módulos em que ela está (chips) e os que dá para acrescentar.
+		modulos: {
+			dela: seusModulos.map((m) => ({ id: m.id, name: m.name, color: corOuPadrao(m.color) })),
+			outros: todosModulos.filter((m) => !seusModulos.some((d) => d.id === m.id))
 		},
 		/** `no-ar` · `mudancas` (no ar, com edições por publicar) · `rascunho`. */
 		estado: published

@@ -18,12 +18,15 @@
 		"test:e2e": "playwright install && playwright test",
 		"worker": "tsx watch worker/index.ts",
 		"db:migrate": "prisma migrate dev",
+		"db:deploy": "prisma migrate deploy",
 		"db:studio": "prisma studio",
-		"db:generate": "prisma generate"
+		"db:generate": "prisma generate",
+		"db:seed:demo": "tsx scripts/seed-demo.ts"
 	},
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1121.0",
 		"@better-auth/stripe": "^1.7.2",
+		"@google/genai": "^2.27.0",
 		"@prisma/adapter-pg": "^7.10.0",
 		"@prisma/client": "^7.10.0",
 		"better-auth": "^1.7.2",

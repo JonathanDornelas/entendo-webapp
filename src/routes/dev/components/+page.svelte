@@ -46,7 +46,7 @@
 		kind,
 		primary,
 		secondary,
-		language: 'Inglês',
+		idioma: 'en-US',
 		usedIn: 1,
 		target: primary,
 		source: secondary,
@@ -63,7 +63,7 @@
 			daBiblioteca: true
 		}),
 		linha('m2', 'vocab', 'breakfast', 'café da manhã', { usedIn: 2, daBiblioteca: true }),
-		linha('m3', 'vocab', 'afternoon', 'tarde', { usedIn: 0, language: '' }),
+		linha('m3', 'vocab', 'afternoon', 'tarde', { usedIn: 0, idioma: null }),
 		linha('m4', 'text', "Ana's morning", 'Sem perguntas — nada será gerado deste texto', {
 			raw: 'Ana wakes up at six thirty every morning.',
 			secondary: 'Sem perguntas — nada será gerado deste texto'
@@ -1781,7 +1781,7 @@
 			</p>
 
 			<div class="mt-5 flex flex-wrap gap-2">
-				{#each [null, 'livre', 'professor', 'escola'] as const as id (id ?? 'nenhum')}
+				{#each [null, 'basico', 'pro', 'super'] as const as id (id ?? 'nenhum')}
 					<button
 						type="button"
 						onclick={() => (planoDemo = id)}

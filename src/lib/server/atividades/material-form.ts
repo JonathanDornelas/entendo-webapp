@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { contentUnitKinds } from '$lib/kernel/content/types';
+import { campoIdioma } from '$lib/idiomas';
 
 /**
  * Os campos que um formulário de material manda, e como eles viram o
@@ -26,7 +27,12 @@ export const camposMaterial = {
 	/** `[{ question, answer }]` do `Passage`. */
 	questions: z.string().optional(),
 	/** `[{ speaker, text }]` do `Dialogue`. */
-	lines: z.string().optional()
+	lines: z.string().optional(),
+	/**
+	 * A tag de idioma, só na BIBLIOTECA — no wizard o material é da atividade e
+	 * o idioma dela vale. Vazio = sem idioma.
+	 */
+	idioma: campoIdioma
 };
 
 export type CamposMaterial = {
@@ -38,6 +44,7 @@ export type CamposMaterial = {
 	example?: string;
 	questions?: string;
 	lines?: string;
+	idioma?: string | null;
 };
 
 /** Lista montada na tela; JSON quebrado aqui é bug de código, não do professor. */

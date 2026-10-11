@@ -2,8 +2,9 @@
  * Envio de e-mail. `EMAIL_PROVIDER=smtp` manda de verdade; vazio registra no
  * log e não finge que mandou.
  *
- * O convite é o único e-mail transacional do produto hoje, e nada acima deste
- * arquivo sabe qual serviço está por trás.
+ * Nada acima deste arquivo sabe qual serviço está por trás. Os e-mails são o
+ * convite do aluno, o convite de módulo, o convite de escola e o aviso à equipe
+ * — todos montados sobre `base.ts`.
  *
  * `process.env` e NÃO `$env/dynamic/private`: o worker importa este módulo
  * fora do SvelteKit, e o alias `$env` não existe lá — mesma razão do
@@ -17,6 +18,12 @@ export interface EmailParaEnviar {
 	preheader: string;
 	html: string;
 	text: string;
+	/**
+	 * Para onde vai a resposta. Usado no aviso à equipe (formulário de contato,
+	 * pedido de plano): quem lê responde direto a quem escreveu, sem copiar o
+	 * endereço do corpo da mensagem.
+	 */
+	replyTo?: string;
 }
 
 export interface EmailProvider {

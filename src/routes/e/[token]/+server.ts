@@ -11,7 +11,7 @@ import {
  * está entrando e devolve ele para o Player normal.
  *
  * **O token é a identidade do aluno.** Ele não cria conta e não tem senha —
- * ver TURMAS-E-ALUNOS.md. Por isso o cookie é `httpOnly` e escopado à
+ * ver paginas.md "Turmas e alunos". Por isso o cookie é `httpOnly` e escopado à
  * publicação: o link é "só seu", e quem recebe o link responde no seu lugar.
  *
  * O que o aluno já respondeu ANTES neste aparelho é vinculado agora
@@ -23,6 +23,13 @@ export const GET: RequestHandler = async ({ params, cookies, locals }) => {
 	if (!convite) error(404, { message: 'Link não encontrado', reason: 'notFound' });
 
 	const { publication } = convite.delivery;
+
+	// Atividade ARQUIVADA (docs/adr-002-billing.md): não marca o convite como
+	// aberto nem identifica o aluno — só devolve para a entrada, que decide
+	// entre "encerrada" e "continuar de onde parei" (quem já começou termina).
+	if (publication.activityVersion.activity.archivedAt) {
+		redirect(303, `/a/${publication.slug}`);
+	}
 
 	await convitePorToken.markOpened(convite.id);
 

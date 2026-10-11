@@ -1,6 +1,13 @@
-import type { PageServerLoad } from './$types';
+import { fail } from '@sveltejs/kit';
+import { z } from 'zod';
+import type { Actions, PageServerLoad } from './$types';
 import { requireTeacher } from '$lib/server/auth/guard';
-import { can } from '$lib/server/billing/entitlements';
+import { acessoDoProfessor, resumoDoAcesso } from '$lib/server/billing/acesso';
+import { minhaAssinatura } from '$lib/server/db/repos/assinatura';
+import { contaProfessor } from '$lib/server/db/repos/teachers';
+import { textoDoEvento } from '$lib/billing/auditoria';
+import { NOME_DO_PLANO, ehPlanoPago } from '$lib/billing/catalogo';
+import { prisma } from '$lib/server/db/client';
 
 /**
  * Conta E assinatura, numa tela só com duas abas. Precisa de loader próprio
@@ -10,40 +17,24 @@ import { can } from '$lib/server/billing/entitlements';
  *
  * DTO explícito — nunca a entidade inteira do professor (auth.md
  * "Serialização"): `stripeCustomerId` fica aqui.
+ *
+ * O estado da assinatura sai de `acessoDoProfessor` → `can()`, a MESMA decisão
+ * que barra criar e publicar (billing.md "Entitlements"). Antes havia aqui um
+ * `estadoDoPlano` próprio que transformava qualquer status desconhecido em
+ * "trial" — inclusive uma assinatura expirada.
  */
-type PlanStatus = 'active' | 'trial' | 'past_due' | 'pending' | 'canceled';
-
-/**
- * O estado de cobrança que a TELA conhece. O do banco é o vocabulário do
- * provedor (`trialing`, `incomplete`, ...); a aba fala nos cinco estados que
- * têm desenho próprio. `null` — professor sem nenhum registro — é tratado
- * como trial, que é o estado de fábrica do cadastro (billing.md "Trial").
- */
-function estadoDoPlano(status: string | null | undefined): PlanStatus {
-	switch (status) {
-		case 'active':
-			return 'active';
-		case 'past_due':
-		case 'unpaid':
-			return 'past_due';
-		case 'incomplete':
-		case 'pending':
-			return 'pending';
-		case 'canceled':
-			return 'canceled';
-		default:
-			return 'trial';
-	}
-}
-
-function dataPorExtenso(data: Date | null | undefined): string | null {
-	if (!data) return null;
-	return data.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' });
-}
-
-export const load: PageServerLoad = ({ locals, url }) => {
+export const load: PageServerLoad = async ({ locals, url }) => {
 	const teacher = requireTeacher(locals);
-	const status = estadoDoPlano(teacher.subscriptionStatus);
+	const repo = minhaAssinatura(teacher);
+	const [estado, pedido, eventos, perfil, turmas, alunos] = await Promise.all([
+		acessoDoProfessor(teacher),
+		repo.pedidoPendente(),
+		repo.historico(),
+		contaProfessor(teacher).perfil(),
+		// Contagens do cabeçalho — agregado do próprio professor, escopado (db.md).
+		prisma.classroom.count({ where: { teacherId: teacher.id } }),
+		prisma.student.count({ where: { teacherId: teacher.id } })
+	]);
 
 	return {
 		// A aba vem da URL para a barra lateral continuar apontando para a
@@ -55,18 +46,54 @@ export const load: PageServerLoad = ({ locals, url }) => {
 			// Troca de e-mail com confirmação pendente ainda não existe.
 			pendingEmail: null,
 			/** Dezoito números, ou nulo para cair nas iniciais (`$lib/avatar/montar.ts`). */
-			avatar: teacher.avatar ?? null
+			avatar: teacher.avatar ?? null,
+			/** O que ele ensina e a língua dos alunos — os PADRÕES das telas de criar. */
+			idiomas: perfil.idiomas,
+			idiomaDosAlunos: perfil.idiomaDosAlunos,
+			desde: perfil.desde
 		},
-		plan: {
-			status,
-			name: teacher.plan ?? 'Plano professor',
-			periodEnd: dataPorExtenso(teacher.currentPeriodEnd),
-			// A MESMA decisão que barra o botão de publicar — nunca uma cópia
-			// dela aqui (billing.md "Entitlements").
-			podePublicar: can(teacher, 'publicar_atividade')
-		},
-		// Sem provedor de cobrança não há fatura. A lista existe na tela para
-		// quando o Stripe entrar — vazia, nunca inventada.
-		invoices: []
+		contagens: { turmas, alunos },
+		acesso: resumoDoAcesso(estado),
+		pedido: pedido
+			? {
+					plano: ehPlanoPago(pedido.plano) ? NOME_DO_PLANO[pedido.plano] : pedido.plano,
+					ciclo: pedido.ciclo,
+					quando: pedido.createdAt
+				}
+			: null,
+		historico: eventos.map((e) => ({
+			id: e.id,
+			texto: textoDoEvento(e.type, e.data),
+			quando: e.createdAt
+		}))
 	};
+};
+
+export const actions: Actions = {
+	/**
+	 * "Seus dados": o NOME (o que aparece para os alunos no convite), os idiomas
+	 * que ele ensina e a língua dos alunos. O e-mail é a credencial de entrada e
+	 * trocá-lo pede confirmação no endereço novo, que ainda não existe; por isso
+	 * ele não é lido aqui. Idioma fora da lista do produto é descartado no
+	 * repositório — o corpo do pedido é do navegador.
+	 */
+	profile: async ({ locals, request }) => {
+		const teacher = requireTeacher(locals);
+		const form = await request.formData();
+		const lido = z
+			.object({
+				name: z.string().trim().min(1, 'Escreva o seu nome.').max(120, 'Nome longo demais.'),
+				idiomas: z.array(z.string().max(20)).max(20),
+				idiomaDosAlunos: z.string().max(20)
+			})
+			.safeParse({
+				name: form.get('name'),
+				idiomas: form.getAll('idiomas'),
+				idiomaDosAlunos: form.get('idiomaDosAlunos') ?? 'pt-BR'
+			});
+		if (!lido.success)
+			return fail(400, { erro: lido.error.issues[0]?.message ?? 'Confira os campos.' });
+		await contaProfessor(teacher).gravarPerfil(lido.data);
+		return { salvo: true };
+	}
 };
