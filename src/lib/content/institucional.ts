@@ -39,7 +39,7 @@ export const privacidade: LegalSection[] = [
 		],
 		{
 			l: [
-				'Cadastro do professor: nome, e-mail, senha em hash, instituição de ensino e idioma de trabalho.',
+				'Cadastro do professor: nome, e-mail e senha em hash. Opcionalmente, os idiomas que você ensina e a língua dos seus alunos, usados só como padrão ao criar atividades e turmas.',
 				'Conteúdo de autoria: os materiais que você cola ou envia no Studio, os itens gerados a partir deles e os ajustes que você faz.',
 				'Dados de aluno: nome ou apelido informado na entrada da atividade, respostas enviadas, tempo por item e pontuação.',
 				'Dados técnicos: endereço IP, tipo de navegador, sistema operacional, data e hora dos acessos e registros de erro.',
@@ -67,7 +67,7 @@ export const privacidade: LegalSection[] = [
 		{
 			l: [
 				'Infraestrutura em nuvem, para hospedagem e banco de dados.',
-				'Provedor de modelos de linguagem, para a geração de itens a partir dos seus materiais.',
+				'Provedor de modelos de linguagem (Google Gemini), só quando você usa "Gerar com IA".',
 				'Serviço de e-mail transacional, para avisos de conta e de atividade.',
 				'Processador de pagamentos, nos planos pagos.',
 				'Autoridades públicas, quando houver ordem judicial ou obrigação legal.'
@@ -86,10 +86,12 @@ export const privacidade: LegalSection[] = [
 			note: 'Se você é responsável por um aluno e quer saber quais dados existem sobre ele, escreva para o encarregado. Nós encaminhamos o pedido à instituição e respondemos junto com ela.'
 		}
 	),
-	P('Uso do seu conteúdo para gerar itens', [
-		'Os materiais que você cola no Studio são enviados a um provedor de modelo de linguagem para produzir os itens da atividade. Esse envio acontece só quando você aciona a geração.',
-		'Não usamos o seu conteúdo, nem as respostas dos seus alunos, para treinar modelos de terceiros. Nossos contratos com os provedores vedam expressamente o uso dos dados enviados para treinamento.',
-		'Os itens gerados ficam na sua biblioteca e são seus. Você pode editar, excluir ou exportar a qualquer momento.'
+	P('Uso do seu conteúdo e geração por IA', [
+		'Os exercícios da atividade são gerados nos nossos próprios servidores, a partir dos materiais que você cadastra, sem enviar esse conteúdo a terceiros.',
+		'"Gerar com IA" é opcional: quando você usa, o pedido que você escreveu e os nomes dos idiomas vão ao provedor de modelo de linguagem para ele propor materiais. Nenhum dado de aluno é enviado, e nada entra na sua biblioteca antes de você marcar e confirmar.',
+		'Não usamos o seu conteúdo, nem as respostas dos seus alunos, para treinar modelos. Usamos a modalidade paga do provedor, em que os dados enviados não são usados para treinamento.',
+		'Os materiais e as atividades são seus. Você pode editar e excluir a qualquer momento.',
+		'Se você faz parte de uma escola no plano Scholar, a coordenação vê números agregados das suas turmas — nunca nomes de alunos nem respostas.'
 	]),
 	P(
 		'Por quanto tempo guardamos',
@@ -324,7 +326,7 @@ export const principles: Principle[] = [
 	},
 	{
 		t: 'Menos campos',
-		d: 'Cada campo a mais é uma decisão empurrada para antes da hora. Habilidade, nível e formato saem do material, não de um formulário.',
+		d: 'Cada campo a mais é uma decisão empurrada para antes da hora. Habilidade e formato saem do material, não de um formulário — e o nível, quando você quer marcar, é um rótulo opcional.',
 		icon: 'M4 7h16M4 12h10M4 17h6'
 	}
 ];
@@ -387,19 +389,57 @@ export const faqGrupos: FaqGroup[] = [
 		]
 	},
 	{
-		t: 'Conta e cobrança',
+		t: 'Planos e limites',
 		items: [
 			[
-				'Existe plano gratuito?',
-				'Sim, com limite mensal de atividades publicadas e turmas ativas. Não pedimos cartão para começar.'
+				'Como começo?',
+				'Toda conta nova começa num período de teste, sem cartão, com os limites do plano Básico. Antes de ele acabar, escolha um plano em Planos — a equipe confirma o pagamento e ativa.'
 			],
 			[
-				'Posso exportar meu conteúdo?',
-				'A qualquer momento, e sem precisar pedir. A exportação sai em formato aberto com os materiais, os itens e os resultados.'
+				'O que conta no limite de atividades e de materiais?',
+				'O que existe agora na sua conta, não o que você criou no mês. Rascunho e atividade no ar contam; atividade arquivada não. Material igual a um que você já tem é reaproveitado e não ocupa vaga nova.'
+			],
+			[
+				'Cheguei ao limite. Preciso apagar alguma coisa?',
+				'Não precisa apagar: arquive. Arquivar fecha o link para quem ainda não começou, guarda todos os resultados e libera a vaga. Quem já estava respondendo termina normalmente. Na biblioteca, apagar um material não mexe em nenhuma atividade.'
+			],
+			[
+				'O que são os créditos de IA?',
+				'Nos planos Pro e Super, a IA propõe materiais a partir de um pedido seu. Cada proposta custa um crédito, e a que não servir é devolvida. Os créditos renovam todo mês, no dia em que o plano foi ativado, e não acumulam.'
+			],
+			[
+				'E se o meu plano vencer?',
+				'Nada é apagado e nenhum link sai do ar: as atividades publicadas continuam recebendo respostas. O que pausa é criar e publicar, do seu lado, até você renovar.'
 			],
 			[
 				'Como cancelo?',
-				'Pelas configurações da conta, em dois cliques. O acesso continua até o fim do ciclo já pago e você tem 30 dias para exportar antes da exclusão.'
+				'Em Conta › Assinatura, "Cancelar no fim do período". Até lá nada muda, e dá para desfazer.'
+			]
+		]
+	},
+	{
+		t: 'Módulos e nível',
+		items: [
+			[
+				'O que é um módulo?',
+				'Uma sequência de atividades com nome — "Intermediário", "Frutas", "Unidade 3". Ele organiza a sua lista e manda tudo de uma vez para a turma, com um e-mail só por aluno trazendo todos os links. Uma atividade pode estar em vários módulos.'
+			],
+			[
+				'O nível muda os exercícios?',
+				'Não. O nível (A1 a C2) é um rótulo seu: organiza e filtra a lista e aparece para o aluno ao lado do idioma. Os exercícios continuam saindo do material.'
+			]
+		]
+	},
+	{
+		t: 'Escolas',
+		items: [
+			[
+				'Como funciona o plano da escola?',
+				'A escola contrata o Scholar com limites combinados por professor. A coordenação convida os professores, e quem aceita passa a usar o plano da escola no lugar do próprio.'
+			],
+			[
+				'O que a coordenação vê das minhas turmas?',
+				'Só números: quantos alunos, envios, tentativas terminadas e o acerto médio de cada turma. Nunca o nome de um aluno nem uma resposta. Seu conteúdo continua seu, inclusive se você sair da escola.'
 			]
 		]
 	}

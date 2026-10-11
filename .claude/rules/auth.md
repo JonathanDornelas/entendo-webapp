@@ -4,6 +4,8 @@ paths:
   - 'src/lib/server/auth/**'
   - 'src/lib/server/db/**'
   - 'src/routes/(studio)/**'
+  - 'src/routes/(admin)/**'
+  - 'src/lib/server/escola/**'
 ---
 
 # Autenticação e isolamento
@@ -51,10 +53,58 @@ const atividade = await prisma.activity.findUnique({ where: { id } });
 O repositório retorna `null` quando o registro existe mas pertence a outro professor. Não
 distinga "não existe" de "não é seu" na resposta — isso vaza a existência do recurso.
 
+## As duas leituras ENTRE professores — e só elas
+
+Fora destas duas, nenhuma query cruza `teacherId`. As duas têm guard próprio, escopo MARCADO no tipo
+(o repositório só aceita o escopo que o guard produz) e respondem **404**, não 403 — a área não existe
+para quem não a acessa, e um 403 confirmaria que ela está ali.
+
+**Painel interno (`/admin`)** — quem opera a plataforma (`docs/operacao.md`).
+
+- `requirePlatformAdmin(locals)` → `AdminScope`. A lista é `PLATFORM_ADMIN_IDS`: **ids de `Teacher`,
+  nunca e-mails** — o cadastro não verifica e-mail, e uma lista de endereços daria o painel a quem se
+  cadastrasse primeiro com o e-mail do dono.
+- `hooks.server.ts` devolve 404 em `/admin` ANTES do redirecionamento de login. É defesa em
+  profundidade: remote function não passa pelo hook (a rota dela é `/_app/remote/...`), então toda
+  função de `admin.remote.ts` abre com o guard.
+- `repos/admin.ts` expõe conta, cobrança, contagens e auditoria. **Nunca dado de aluno** nem conteúdo
+  de atividade (`admin.test.ts` confere).
+
+**Coordenação da escola (`/escola`)** — `docs/adr-005-escola.md`.
+
+- `requireCoordenacao(locals)` → `CoordenacaoScope` (membro com papel `coordenacao` de escola
+  `ativa`). `ehCoordenacao` só decide se a TELA mostra a entrada; não é barreira.
+- `repos/escola.ts` lê **só números**: por professor, uso contra limite; por turma, contagem de
+  alunos, envios, tentativas terminadas, acerto médio. **Nenhum nome de aluno, nenhuma resposta** —
+  decisão do dono do repositório, e acesso de terceiro a dado de aluno é exatamente o que a seção de
+  LGPD abaixo protege. Ex-membro some da visão.
+- Aceitar convite de escola é dar à coordenação essa visão: é um BOTÃO, com o que muda escrito antes,
+  nunca efeito de abrir o link. O token (192 bits) é a prova de controle do e-mail.
+
 ## Serialização
 
 Nunca devolva a entidade do usuário inteira para o browser. Hash de senha, tokens, identificador
 de cliente do gateway de pagamento — nada disso atravessa. DTO explícito, sempre.
+
+## Senha — trocar e recuperar
+
+Tudo pelo Better Auth, nas DUAS instâncias; nada de hash ou token escrito à mão.
+
+- **Trocar** (cartão "Senha" da conta do professor): `changePassword` com a senha ATUAL — a sessão
+  sozinha não basta, senão um navegador esquecido aberto trocaria a senha de alguém — e
+  `revokeOtherSessions: true`: os outros aparelhos saem, este continua. Senha atual errada volta
+  `INVALID_PASSWORD` e a tela diz "A senha atual não confere".
+- **Esqueci a senha** é UMA tela com o seletor professor/aluno, como entrar (`?como=aluno`
+  pré-seleciona). O pedido vai para a instância certa, com `redirectTo` em `/redefinir-senha` —
+  `?como=aluno` junto, porque o token é da instância do aluno e a tela de nova senha precisa saber
+  para quem mandar. A resposta é NEUTRA ("se esse e-mail existir") nos dois casos.
+- **O link vai por e-mail, pela fila** (`server/auth/senha.ts` → job `redefinir-senha` →
+  `email/redefinir-senha.ts`). O Better Auth só chama `sendResetPassword` para e-mail que EXISTE, e
+  a tela não pode mostrar falha (vazaria quem tem conta) — então provedor fora do ar tem de virar
+  retentativa, não erro. Vale 1 hora (`VALIDADE_DO_LINK_S`, o mesmo número em
+  `resetPasswordTokenExpiresIn`, no e-mail e no job, que não manda link vencido). Em dev o link
+  também sai no console do servidor; em produção nunca — link de redefinição no log é senha no log.
+- Redefinir não abre sessão: a tela leva ao entrar (no modo certo) com "Senha nova salva".
 
 ## Superfície pública
 
@@ -153,7 +203,9 @@ some no prazo.
 `StudentAccount.avatar` guarda dezoito números (`$lib/avatar/montar.ts`). O que o aprovou, contra
 a regra acima: não é dado COLETADO nem observado — é escolha de enfeite, feita pela própria pessoa;
 não identifica ninguém (índices de peça de desenho, sem nenhum campo de texto livre onde caiba um
-nome); e é opcional, então a conta que nunca abre o editor continua sendo só nome, e-mail e senha.
+nome); e quem escolhe é a pessoa — a conta NASCE com um sorteado pelo sistema (o hook de cadastro;
+nenhum dado vem dela), e trocar é opcional. Quem não tem um gravado é desenhado pelo `avatarPadrao`
+do nome (`$lib/avatar/montar.ts`), sem gravar nada.
 Não tem prazo de retenção próprio porque não é observação sobre a pessoa: ele morre com a conta.
 
 **Adotar tentativas soltas deixou de ser automático.** Entrar e criar conta não vinculam mais nada

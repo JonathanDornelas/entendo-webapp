@@ -10,11 +10,22 @@
 	// — o wizard para editar, a publicação para reenviar, os resultados para o
 	// relatório. A única escrita é gerar o áudio de novo, quando ele falta.
 	import { resolve } from '$app/paths';
+	import IdiomaTag from '$lib/components/IdiomaTag.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import Loading from '$lib/components/Loading.svelte';
 	import HeaderCard from '$lib/components/HeaderCard.svelte';
-	import { regerarAudio } from '../atividades.remote';
+	import { goto } from '$app/navigation';
+	import {
+		apagarAtividade,
+		arquivarAtividade,
+		definirNivel,
+		desarquivarAtividade,
+		regerarAudio
+	} from '../atividades.remote';
 	import { withMock } from '$lib/dev/with-mock';
+	import { NIVEIS, nivelOuNulo, rotuloDoNivel, type NivelId } from '$lib/atividades/nivel';
+	import { CLASSE_DA_ETIQUETA, type CorDeEtiqueta } from '$lib/etiquetas';
+	import { adicionarAoModulo } from '../../modulos/modulos.remote';
 
 	type Tipo = 'escuta' | 'fala' | 'escrita' | 'escolha' | 'montar';
 	type Estado = 'no-ar' | 'mudancas' | 'rascunho';
@@ -43,11 +54,18 @@
 			id: string;
 			title: string;
 			targetLang: string;
+			idioma: string | null;
 			sourceLang: string;
 			createdAt: string;
 			updatedAt: string;
+			arquivada: boolean;
+			level: NivelId | null;
 		};
 		estado: Estado;
+		modulos: {
+			dela: { id: string; name: string; color: CorDeEtiqueta }[];
+			outros: { id: string; name: string }[];
+		};
 		/** O link do aluno — só depois da primeira publicação; antes é `null`. */
 		link: string | null;
 		/** Data URL do QR. Nasce junto com o link, na publicação. */
@@ -71,11 +89,15 @@
 			id: 'atv_01',
 			title: 'Present perfect — turma B',
 			targetLang: 'Inglês',
+			idioma: 'en-US',
 			sourceLang: 'Português',
 			createdAt: '12 de março',
-			updatedAt: 'há 2 dias'
+			updatedAt: 'há 2 dias',
+			arquivada: false,
+			level: 'B1'
 		},
 		estado: 'no-ar',
+		modulos: { dela: [], outros: [] },
 		audio: { done: 6, total: 6, venceEmDias: 8 },
 		link: 'https://entendo.app/a/atv_01',
 		qr: '',
@@ -230,6 +252,83 @@
 	}
 	const temRespostas = $derived(data.attempts.total > 0);
 
+	let moduloEscolhido = $state('');
+	let acrescentandoAoModulo = $state(false);
+	async function acrescentarAoModulo() {
+		if (!moduloEscolhido) return;
+		acrescentandoAoModulo = true;
+		try {
+			await adicionarAoModulo({ moduleId: moduloEscolhido, activityIds: [data.activity.id] });
+			moduloEscolhido = '';
+			await invalidateAll();
+		} finally {
+			acrescentandoAoModulo = false;
+		}
+	}
+
+	let salvandoNivel = $state(false);
+	async function trocarNivel(valor: string) {
+		salvandoNivel = true;
+		try {
+			await definirNivel({ activityId: data.activity.id, level: nivelOuNulo(valor) });
+			await invalidateAll();
+		} finally {
+			salvandoNivel = false;
+		}
+	}
+
+	// ── arquivar e apagar ── Os limites do plano são de ESTOQUE
+	// (docs/adr-002-billing.md): arquivar é o jeito de liberar a vaga sem perder
+	// o que a turma fez; apagar é para quando nem os resultados importam mais.
+	let acaoDoFim = $state<'arquivar' | 'desarquivar' | 'apagar' | null>(null);
+	let erroDoFim = $state<string | null>(null);
+	let motivoDoFim = $state<string | null>(null);
+	let confirmandoApagar = $state(false);
+	let tituloDigitado = $state('');
+
+	async function arquivarOuVoltar() {
+		const qual = data.activity.arquivada ? 'desarquivar' : 'arquivar';
+		acaoDoFim = qual;
+		erroDoFim = null;
+		motivoDoFim = null;
+		try {
+			const r =
+				qual === 'arquivar'
+					? await arquivarAtividade({ activityId: data.activity.id })
+					: await desarquivarAtividade({ activityId: data.activity.id });
+			if (!r.ok) {
+				erroDoFim =
+					'error' in r && typeof r.error === 'string' ? r.error : 'Não deu para concluir agora.';
+				motivoDoFim = 'motivo' in r && typeof r.motivo === 'string' ? r.motivo : null;
+			}
+			await invalidateAll();
+		} catch {
+			erroDoFim = 'Não deu para concluir agora. Tente de novo em instantes.';
+		} finally {
+			acaoDoFim = null;
+		}
+	}
+
+	async function apagarDeVez() {
+		acaoDoFim = 'apagar';
+		erroDoFim = null;
+		try {
+			const r = await apagarAtividade({
+				activityId: data.activity.id,
+				confirmacao: tituloDigitado
+			});
+			if (r.ok) {
+				await goto(resolve('/(studio)/atividades'), { invalidateAll: true });
+				return;
+			}
+			erroDoFim = 'error' in r && r.error ? r.error : 'Não deu para apagar.';
+		} catch {
+			erroDoFim = 'Não deu para apagar agora. Tente de novo em instantes.';
+		} finally {
+			acaoDoFim = null;
+		}
+	}
+
 	function percentual(parte: number, total: number): number {
 		return total > 0 ? Math.round((parte / total) * 100) : 0;
 	}
@@ -251,7 +350,7 @@
 
 <svelte:head><title>{data.activity.title} — entendo</title></svelte:head>
 
-<div class="px-gutter py-gutter-sm">
+<div class="pagina-studio">
 	<a
 		href={resolve('/(studio)/atividades')}
 		class="mb-4 inline-flex items-center gap-2 py-1 text-[0.84rem] font-semibold text-base-content/65 no-underline transition-transform hover:-translate-x-0.5"
@@ -301,10 +400,53 @@
 		>
 			{data.activity.title}
 		</h1>
-		<p class="text-[13.5px] text-base-content/65">
-			{data.activity.targetLang} · criada em {data.activity.createdAt} · editada {data.activity
-				.updatedAt}
+		<p class="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[13.5px] text-base-content/65">
+			<IdiomaTag tag={data.activity.idioma} />
+			<span>criada em {data.activity.createdAt} · editada {data.activity.updatedAt}</span>
 		</p>
+		<!-- O nível é rótulo (adr-004-modulos-e-nivel.md): troca aqui, na hora, sem
+		     passar pelo wizard nem republicar — não mexe em exercício nenhum. -->
+		<label class="mt-2 inline-flex items-center gap-2 text-[12.5px] text-base-content/65">
+			Nível
+			<select
+				class="select h-9 min-h-9 w-auto py-0 text-[12.5px]"
+				value={data.activity.level ?? ''}
+				disabled={salvandoNivel}
+				onchange={(e) => trocarNivel(e.currentTarget.value)}
+			>
+				<option value="">Sem nível</option>
+				{#each NIVEIS as n (n.id)}
+					<option value={n.id}>{rotuloDoNivel(n.id)}</option>
+				{/each}
+			</select>
+		</label>
+		<!-- Os módulos em que ela está — uma atividade pode estar em vários
+		     (adr-004-modulos-e-nivel.md). Cada chip leva ao módulo. -->
+		<div class="mt-2 flex flex-wrap items-center gap-1.5">
+			{#each data.modulos.dela as m (m.id)}
+				<a
+					href={resolve('/(studio)/modulos/[id]', { id: m.id })}
+					class="rounded-full px-2.5 py-1 text-[12px] font-bold no-underline {CLASSE_DA_ETIQUETA[
+						m.color
+					]}">{m.name}</a
+				>
+			{/each}
+			{#if data.modulos.outros.length > 0}
+				<label class="sr-only" for="acrescentar-modulo">Acrescentar a um módulo</label>
+				<select
+					id="acrescentar-modulo"
+					bind:value={moduloEscolhido}
+					onchange={acrescentarAoModulo}
+					disabled={acrescentandoAoModulo}
+					class="select h-8 min-h-8 w-auto py-0 text-[12px]"
+				>
+					<option value="">+ Acrescentar a um módulo</option>
+					{#each data.modulos.outros as m (m.id)}
+						<option value={m.id}>{m.name}</option>
+					{/each}
+				</select>
+			{/if}
+		</div>
 		{#snippet actions()}
 			<a
 				href={resolve('/(studio)/atividades/[id]/revisar', { id: data.activity.id })}
@@ -339,6 +481,30 @@
 			{/if}
 		{/snippet}
 	</HeaderCard>
+
+	{#if data.activity.arquivada}
+		<!-- Arquivada vem antes de tudo: é o que muda o que o aluno encontra. -->
+		<div
+			class="mb-[26px] flex flex-wrap items-center gap-3 rounded-[14px] border border-dashed border-line bg-base-200 px-4 py-3.5 lg:px-5"
+			role="status"
+		>
+			<p class="min-w-[240px] flex-1 text-[13.5px] leading-relaxed">
+				<strong>Arquivada.</strong> O link está fechado para quem ainda não começou — quem já estava respondendo
+				termina, e os resultados continuam aqui. Ela não conta no limite do seu plano.
+			</p>
+			<button
+				type="button"
+				onclick={arquivarOuVoltar}
+				disabled={acaoDoFim !== null}
+				class="btn h-[42px] motion-tap gap-2 btn-primary text-[13.5px] font-bold"
+			>
+				{#if acaoDoFim === 'desarquivar'}
+					<Loading variant="fila" size={10} tone="current" label="Desarquivando" />
+				{/if}
+				Desarquivar
+			</button>
+		</div>
+	{/if}
 
 	<!-- ═══ 2. se está no ar — e se o áudio existe ═══ -->
 	<div class="mb-[26px] overflow-hidden rounded-[14px] border {estado.card}">
@@ -613,7 +779,10 @@
 		<div class="mb-3.5 flex flex-wrap items-baseline gap-x-3.5 gap-y-2.5">
 			<h2 class="font-display text-lg font-semibold lg:text-xl">As questões</h2>
 			<span class="text-[13px] text-base-content/65">
-				{data.items.length} · clique para abrir no editor de item
+				{data.items.length}
+				{data.items.length === 1 ? 'questão' : 'questões'}{data.skills.length > 0
+					? ` · ${data.skills.map((sk) => `${sk.name} ${sk.count}`).join(', ')}`
+					: ''} · clique numa para editar
 			</span>
 			<div class="min-w-1 flex-1"></div>
 			<!-- `?voltar=detalhe`: a prévia é uma tela fechada, e o X dela precisa
@@ -685,30 +854,6 @@
 				<p class="px-5 py-6 text-center text-[13.5px] text-base-content/65">
 					Nenhuma questão ainda — gere ou crie itens no wizard.
 				</p>
-			{/each}
-		</div>
-	</section>
-
-	<!-- ═══ 5. habilidades ═══ -->
-	<section class="mb-[30px]">
-		<div class="mb-3.5 flex flex-wrap items-baseline gap-x-3.5 gap-y-2.5">
-			<h2 class="font-display text-lg font-semibold lg:text-xl">Habilidades treinadas</h2>
-			<span class="text-[13px] text-base-content/65"
-				>saem dos itens — não há campo de habilidade em formulário nenhum</span
-			>
-		</div>
-		<div class="flex flex-wrap gap-2">
-			{#each data.skills as skill (skill.name)}
-				<span
-					class="inline-flex items-center gap-2 rounded-full border border-line bg-base-200 px-[13px] py-[7px] text-[13px]"
-				>
-					{skill.name}
-					<b class="font-mono text-xs font-medium text-base-content/65">{skill.count}</b>
-				</span>
-			{:else}
-				<span class="text-[13.5px] text-base-content/65"
-					>Nenhuma ainda — sem questões, não há o que treinar.</span
-				>
 			{/each}
 		</div>
 	</section>
@@ -846,5 +991,100 @@
 				</p>
 			</div>
 		{/if}
+	</section>
+	<!-- ═══ 7. arquivar ou apagar ═══ Os limites do plano contam o que EXISTE
+	     (docs/adr-002-billing.md). Arquivar libera a vaga sem perder resultado;
+	     apagar leva tudo junto e pede o título digitado. -->
+	<section class="mt-[34px]">
+		<h2 class="mb-1 font-display text-section font-semibold">Arquivar ou apagar</h2>
+		<p class="mb-3.5 text-[13px] text-base-content/65">para liberar espaço no seu plano</p>
+		<div class="grid gap-3">
+			{#if !data.activity.arquivada}
+				<div
+					class="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-box border border-line bg-card px-4 py-4 lg:px-5"
+				>
+					<p class="min-w-[240px] flex-1 text-[13px] leading-relaxed text-base-content/70">
+						<strong class="text-base-content">Arquivar</strong> fecha o link para quem ainda não começou
+						e tira a atividade do limite do plano. Quem já está respondendo termina, e os resultados ficam
+						aqui. Dá para desarquivar depois, se couber no plano.
+					</p>
+					<button
+						type="button"
+						onclick={arquivarOuVoltar}
+						disabled={acaoDoFim !== null}
+						class="btn min-h-11 w-full motion-tap gap-2 btn-plain font-semibold lg:w-auto"
+					>
+						{#if acaoDoFim === 'arquivar'}
+							<Loading variant="fila" size={10} tone="current" label="Arquivando" />
+						{/if}
+						Arquivar
+					</button>
+				</div>
+			{/if}
+
+			<div class="rounded-box border border-error/35 bg-error/6 px-4 py-4 lg:px-5">
+				<p class="text-[13px] leading-relaxed">
+					<strong>Apagar de vez</strong> remove a atividade, as questões e
+					{#if data.attempts.total > 0}
+						<strong
+							>as {data.attempts.total}
+							{data.attempts.total === 1 ? 'tentativa' : 'tentativas'} dos alunos</strong
+						>.
+					{:else}
+						o link.
+					{/if}
+					Não tem volta. Os materiais continuam na sua biblioteca.
+				</p>
+				{#if confirmandoApagar}
+					<label class="mt-3 block">
+						<span class="mb-1.5 block text-[12.5px] font-semibold">
+							Para confirmar, digite o título: <span class="font-mono">{data.activity.title}</span>
+						</span>
+						<input bind:value={tituloDigitado} class="input w-full" autocomplete="off" />
+					</label>
+					<div class="mt-3 flex flex-wrap gap-2">
+						<button
+							type="button"
+							onclick={apagarDeVez}
+							disabled={acaoDoFim !== null || tituloDigitado.trim() !== data.activity.title.trim()}
+							class="btn min-h-11 motion-tap gap-2 btn-error font-bold"
+						>
+							{#if acaoDoFim === 'apagar'}
+								<Loading variant="fila" size={10} tone="current" label="Apagando" />
+							{/if}
+							Apagar de vez
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								confirmandoApagar = false;
+								tituloDigitado = '';
+							}}
+							class="btn min-h-11 motion-tap btn-plain font-semibold">Cancelar</button
+						>
+					</div>
+				{:else}
+					<button
+						type="button"
+						onclick={() => (confirmandoApagar = true)}
+						class="mt-3 btn min-h-11 w-full motion-tap btn-outline-error font-bold lg:w-auto"
+					>
+						Apagar esta atividade
+					</button>
+				{/if}
+			</div>
+
+			{#if erroDoFim}
+				<p class="text-[13px] font-semibold text-error" role="alert">
+					{erroDoFim}
+					{#if motivoDoFim}
+						<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+						<a href={resolve('/(site)/planos') + '?motivo=' + motivoDoFim} class="font-bold"
+							>Ver os planos</a
+						>
+					{/if}
+				</p>
+			{/if}
+		</div>
 	</section>
 </div>

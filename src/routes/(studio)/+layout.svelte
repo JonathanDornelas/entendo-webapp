@@ -7,10 +7,13 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import Logo from '$lib/components/Logo.svelte';
+	import Avatar from '$lib/components/Avatar.svelte';
 	import AmbientShapes from '$lib/components/AmbientShapes.svelte';
 	import StudioSearch from '$lib/components/StudioSearch.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import PlanoCard from '$lib/components/PlanoCard.svelte';
 	import { authClient } from '$lib/client/auth';
+	import { painelLateral, veu } from '$lib/client/transicoes';
 	import type { LayoutProps } from './$types';
 
 	// `data` vem de +layout.server.ts — por essa altura a sessão já foi
@@ -26,26 +29,38 @@
 		await goto(resolve('/'));
 	}
 
-	const nav = [
+	const nav = $derived([
+		// O início: para onde o professor vai ao entrar (paginas.md "Início").
+		{ href: resolve('/(studio)/inicio'), label: 'Início', icon: 'inicio' },
 		{ href: resolve('/(studio)/atividades'), label: 'Atividades', icon: 'list' },
+		// Módulos: coleções de atividades. No celular ficam na gaveta (a barra de abas tem 4).
+		{ href: resolve('/(studio)/modulos'), label: 'Módulos', icon: 'modulo' },
 		{ href: resolve('/(studio)/turmas'), label: 'Turmas', icon: 'turma' },
 		{ href: resolve('/(studio)/resultados'), label: 'Resultados', icon: 'chart' },
 		{ href: resolve('/(studio)/materiais'), label: 'Materiais', icon: 'book' },
+		// A área da coordenação só aparece para quem coordena uma escola — a
+		// barreira de verdade é `requireCoordenacao` no servidor.
+		...(data.coordena
+			? [{ href: resolve('/(studio)/escola'), label: 'Escola', icon: 'escola' }]
+			: []),
 		{ href: resolve('/(studio)/assinatura'), label: 'Assinatura', icon: 'gear' }
-	];
-	// A barra de abas do celular troca "Assinatura" por "Conta": no telefone o
-	// atalho que importa é o da própria conta, e assinatura mora dentro dela.
+	]);
 	// No celular a barra tem quatro alvos: mais que isso vira alvo pequeno
-	// demais. Materiais sai daqui porque a biblioteca é trabalho de mesa.
+	// demais. O início é o primeiro, porque é onde o professor chega; a conta não
+	// precisa de aba — o avatar do cabeçalho já leva a ela, e a assinatura mora
+	// dentro dela. Materiais e módulos ficam na gaveta: são trabalho de mesa.
 	const abas = [
+		{ href: resolve('/(studio)/inicio'), label: 'Início', icon: 'inicio' },
 		{ href: resolve('/(studio)/atividades'), label: 'Atividades', icon: 'list' },
 		{ href: resolve('/(studio)/turmas'), label: 'Turmas', icon: 'turma' },
-		{ href: resolve('/(studio)/resultados'), label: 'Resultados', icon: 'chart' },
-		{ href: resolve('/(studio)/conta'), label: 'Conta', icon: 'user' }
+		{ href: resolve('/(studio)/resultados'), label: 'Resultados', icon: 'chart' }
 	];
 
 	const paths: Record<string, string> = {
+		inicio: 'M4 11l8-6.5 8 6.5V20h-5.5v-5h-5v5H4z',
 		list: 'M3 4h18v16H3zM7 9h10M7 13h6',
+		modulo: 'M4 7.5l8-4 8 4-8 4zM4 12l8 4 8-4M4 16.5l8 4 8-4',
+		escola: 'M12 3.5l9 4.5-9 4.5-9-4.5zM6 11v5.5c0 1.7 2.7 3 6 3s6-1.3 6-3V11',
 		chart: 'M4 18V9M10 18V4M16 18v-6M22 18v-9',
 		book: 'M3 5.5h6a3 3 0 013 3v10a2.5 2.5 0 00-2.5-2.5H3zM21 5.5h-6a3 3 0 00-3 3v10a2.5 2.5 0 012.5-2.5H21z',
 		gear: 'M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2 2M16.4 16.4l2 2M18.4 5.6l-2 2M7.6 16.4l-2 2',
@@ -58,8 +73,12 @@
 
 	// O rótulo da rota atual alimenta o breadcrumb do topo. Rota que não tem
 	// item de menu próprio empresta o rótulo de onde ela pertence — o aluno
-	// mora dentro de Turmas, e sem isto o breadcrumb saía "Studio › Studio".
-	const emprestados: [string, string][] = [[resolve('/(studio)/alunos'), 'Turmas']];
+	// mora dentro de Turmas, e sem isto o breadcrumb saía "Studio › Studio". A
+	// conta também: ela saiu da barra de abas do celular (o avatar leva a ela).
+	const emprestados: [string, string][] = [
+		[resolve('/(studio)/alunos'), 'Turmas'],
+		[resolve('/(studio)/conta'), 'Conta']
+	];
 	const atual = $derived(
 		[...nav, ...abas].find((i) => ativo(i.href))?.label ??
 			emprestados.find(([href]) => ativo(href))?.[1] ??
@@ -124,25 +143,26 @@
 					{data.aCorrigir}
 				</span>
 			{/if}
+			{#if item.label === 'Módulos' && data.modulosComFalha > 0}
+				<!-- O envio programado que não saiu: o único estado de módulo que pede
+				     ação, e por isso o único em vermelho (docs/telas-modulos-professor.md). -->
+				<span
+					class="grid size-5 place-items-center rounded-full bg-error text-[11px] font-bold text-error-content"
+					aria-label="{data.modulosComFalha} {data.modulosComFalha === 1
+						? 'envio que não saiu'
+						: 'envios que não saíram'}"
+				>
+					{data.modulosComFalha}
+				</span>
+			{/if}
 		</a>
 	{/each}
 {/snippet}
 
-{#snippet cartaoTrial()}
-	{#if data.teacher.emTrial}
-		<!-- Duração do trial é pendência de produto (CLAUDE.md), então o card
-		     mostra o estado sem contagem de dias em vez de inventar um número. -->
-		<div class="rounded-[12px] bg-base-200 p-3.5">
-			<p class="mb-2 text-xs font-bold">{data.teacher.plan}</p>
-			<div class="mb-2.5 h-[5px] overflow-hidden rounded-full bg-base-300">
-				<div class="h-full w-1/3 rounded-full bg-primary"></div>
-			</div>
-			<a
-				href={resolve('/(studio)/assinatura')}
-				class="text-[12.5px] font-bold text-primary no-underline">Assinar agora</a
-			>
-		</div>
-	{/if}
+{#snippet cartaoPlano()}
+	<!-- Plano, uso do estoque e créditos — o mesmo estado que decide os
+	     bloqueios (`can()`), montado no servidor (+layout.server.ts). -->
+	<PlanoCard acesso={data.acesso} />
 {/snippet}
 
 <div class="flex min-h-screen bg-base-100">
@@ -187,14 +207,16 @@
 
 		<div class="min-h-[120px] flex-1"></div>
 
-		<div class="relative z-1 px-3.5 pb-3">{@render cartaoTrial()}</div>
+		<div class="relative z-1 px-3.5 pb-3">{@render cartaoPlano()}</div>
 
 		<div class="relative z-1 flex items-center gap-2.5 px-4 py-3.5">
-			<span
-				class="grid size-8 shrink-0 place-items-center rounded-full bg-base-300 text-xs font-bold text-primary"
-			>
-				{data.teacher.initials}
-			</span>
+			<Avatar
+				codigo={data.teacher.avatar}
+				nome={data.teacher.name}
+				size={32}
+				radius="rounded-full"
+				class="shrink-0"
+			/>
 			<a
 				href={resolve('/(studio)/conta')}
 				class="min-w-0 flex-1 text-[12.5px] leading-tight no-underline"
@@ -261,18 +283,22 @@
 			</span>
 			<a
 				href={resolve('/(studio)/conta')}
-				class="grid size-9 shrink-0 place-items-center rounded-full bg-base-300 text-xs font-bold text-primary no-underline"
+				class="shrink-0 rounded-full no-underline"
+				aria-label="Sua conta"
 			>
-				{data.teacher.initials}
+				<Avatar
+					codigo={data.teacher.avatar}
+					nome={data.teacher.name}
+					size={36}
+					radius="rounded-full"
+				/>
 			</a>
 		</header>
 
 		<!-- Topo do desktop: trilha, busca, notificação e ajuda. -->
 		<header class="hidden items-center gap-4 px-[30px] py-[13px] lg:flex">
 			<nav class="flex items-center gap-[9px] text-[13px]" aria-label="Trilha">
-				<a href={resolve('/(studio)/atividades')} class="text-base-content/60 no-underline"
-					>Studio</a
-				>
+				<a href={resolve('/(studio)/inicio')} class="text-base-content/60 no-underline">Studio</a>
 				<svg
 					class="size-3.5 text-base-content/40"
 					viewBox="0 0 24 24"
@@ -363,14 +389,20 @@
 {#if drawerAberto}
 	<!-- Drawer do hambúrguer: as entradas que não cabem na barra de abas. -->
 	<div class="fixed inset-0 z-50 lg:hidden">
+		<!-- Véu e gaveta ENTRAM e SAEM (`$lib/client/transicoes.ts`): aparecer de
+		     uma vez parecia a tela piscando, e sumir de uma vez, um travamento. -->
 		<button
 			type="button"
 			onclick={() => (drawerAberto = false)}
-			class="absolute inset-0 bg-base-content/40"
+			class="absolute inset-0 bg-overlay"
 			aria-label="Fechar menu"
+			in:veu
+			out:veu
 		></button>
 		<div
 			class="absolute inset-y-0 start-0 flex w-[268px] flex-col bg-base-100 shadow-[0_0_40px_-8px_rgba(0,0,0,0.25)]"
+			in:painelLateral={{ lado: 'inicio' }}
+			out:painelLateral={{ lado: 'inicio' }}
 		>
 			<div class="flex items-center gap-2 px-[18px] pt-5 pb-4">
 				<Logo size={22} />
@@ -415,13 +447,15 @@
 			</nav>
 
 			<div class="flex-1"></div>
-			<div class="px-3.5 pb-3">{@render cartaoTrial()}</div>
+			<div class="px-3.5 pb-3">{@render cartaoPlano()}</div>
 			<div class="flex items-center gap-2.5 border-t border-line px-4 py-3.5">
-				<span
-					class="grid size-8 shrink-0 place-items-center rounded-full bg-base-300 text-xs font-bold text-primary"
-				>
-					{data.teacher.initials}
-				</span>
+				<Avatar
+					codigo={data.teacher.avatar}
+					nome={data.teacher.name}
+					size={32}
+					radius="rounded-full"
+					class="shrink-0"
+				/>
 				<div class="min-w-0 flex-1 text-[12.5px] leading-tight">
 					<span class="block truncate font-semibold">{data.teacher.name}</span>
 					<span class="block truncate text-base-content/65">{data.teacher.email}</span>

@@ -23,8 +23,50 @@ Publication ─── Attempt (name, anonId, seed) ─── AttemptItem (answer
 
 Teacher ─┬─ Classroom ─── Student ─┬─ Invite ─── Delivery ─── Publication
          │                         └─ Attempt (studentId, opcional)
+         ├─ Module ─┬─ ModuleActivity (position) ─── Activity       [N:N, ordenado]
+         │          └─ ModuleClassroom (schedule) ─┬─ Classroom     [turma alocada]
+         │                                          └─ ModuleSend (dueAt, status) ─── Activity
+         ├─ AuditEvent (actor, type, data)   PlanRequest (pedido de plano)
+         ├─ CreditEntry (delta, cicloInicio, refKey único)            [livro-razão]
+         └─ SchoolMembership ─── School ─── SchoolInvite (token)      [plano Scholar]
 Job (fila)   StripeEvent (idempotência)
 ```
+
+**Perfil no `Teacher`**: `idiomas` (os que ele ensina, em ORDEM — o primeiro é o padrão da atividade
+nova) e `idiomaDosAlunos` (padrão `pt-BR`). Não são campos do Better Auth: quem escreve é
+`contaProfessor(teacher)` (`repos/teachers.ts`), filtrando pela lista de idiomas do produto.
+
+**Cobrança no `Teacher`** (`docs/adr-002-billing.md`): `plan` guarda o NOSSO id (`basico` | `pro` |
+`super`; `scholar` vem da filiação, nunca daqui), `trialEndsAt`, `planCycle`, `cycleAnchor` (âncora
+dos créditos) e `cancelAtPeriodEnd`. A situação (trial vencido, carência) é DERIVADA dessas datas na
+leitura. Só `$lib/server/billing/assinaturas.ts` escreve esses campos.
+
+`Activity.archivedAt` tira a atividade do estoque do plano e fecha o link para quem ainda não
+começou; `Activity.level` é o rótulo CEFR (`docs/adr-004-modulos-e-nivel.md`). `Delivery.envioId` e
+`moduleId` agrupam o envio de um módulo inteiro. `Delivery.porEmail` (padrão verdadeiro) é falso no
+envio de módulo "só disponibilizar" (`Programacao.canal === 'mapa'`): aí o convite nasce para TODOS
+os alunos — é ele que abre a fase no mapa — e nenhum e-mail entra na fila.
+
+**Apagar uma atividade de vez** obedece aos três FKs `RESTRICT` (`Publication→ActivityVersion`,
+`Attempt→Publication`, `AttemptItem→Item`): tentativas, depois publicações, depois a atividade —
+`atividades(teacher).apagarDeVez`. Não troque esses RESTRICT por Cascade: são eles que impedem que
+apagar um professor leve respostas de aluno por acidente.
+
+`ContentUnit.targetLang` é a TAG DE IDIOMA do material (nula = sem idioma; `$lib/idiomas.ts`). Dentro
+de uma atividade é sempre a dela — `createForActivity` e `link` a gravam, e só dão tag a quem não tem.
+Na biblioteca, a escolhida; e ela só muda enquanto o material não está em atividade nenhuma.
+
+`CreditEntry` não tem contador ao lado: saldo = franquia do plano + soma dos lançamentos do ciclo.
+
+**Turma do módulo e programação** (`docs/adr-004-modulos-e-nivel.md`, atualização):
+`ModuleClassroom` é a turma ALOCADA ao módulo, única por par, e guarda a programação de envio em
+`schedule` (Json, validado por `programacaoSchema` ao ler; nulo = sem programação) e a pausa em
+`pausedAt`. `ModuleSend` é UMA linha por (alocação, atividade), com `dueAt` e o desfecho
+(`programada` | `enviada` | `nao_saiu` | `pulada`, mais `reason`). Essa unicidade é o que torna o
+envio idempotente: a atividade sai uma vez por turma pelo módulo. Nenhuma das duas tem
+`teacherId`; o escopo é `module: { teacherId }` (`repos/programacoes.ts`). Tirar a turma apaga a
+alocação e os envios futuros (Cascade), e os `Delivery` que já saíram ficam — o link é da
+atividade.
 
 `StudentAccount` é a conta OPCIONAL do aluno, com tabelas próprias de sessão e credencial (a
 segunda instância de Better Auth — auth.md). `Student.accountId` liga a ficha de chamada a ela, e
@@ -159,6 +201,16 @@ que ignora a ordem das chaves, mais o mesmo `kind`) e liga aquele à atividade. 
 mesma frase duas vezes criava duas linhas na biblioteca e o professor passava a ver duplicatas
 que ele não fez. Ele devolve `{ id, reused }` — é o `reused` que a tela mostra como
 "biblioteca".
+
+**Repositório que participa de escrita com cota aceita `db: Db`** (o cliente ou a transação —
+`src/lib/server/db/client.ts`): `atividades`, `materiais`, `uso` e `creditos`. Dentro de `comCota`
+toda escrita vai pelo `tx`; com o `prisma` global ela iria por outra conexão, fora da trava.
+
+Ligar duas coisas do professor (atividade em módulo, publicação em turma) confere **as duas pontas**:
+conferir só uma deixaria um POST direto usar o recurso de outra pessoa.
+
+As leituras ENTRE professores (painel interno e coordenação da escola) têm repositórios próprios que
+só aceitam o escopo marcado do guard — `repos/admin.ts` e `repos/escola.ts` (auth.md).
 
 O Player tem repositórios próprios, sem professor, com superfície mínima: resolver publicação
 por slug, criar tentativa, gravar resposta.

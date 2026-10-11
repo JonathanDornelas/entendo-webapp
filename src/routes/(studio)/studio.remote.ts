@@ -6,6 +6,7 @@ import { contaProfessor } from '$lib/server/db/repos/teachers';
 import { codigoDeAvatarSchema } from '$lib/avatar/schema';
 import { parseContentUnit } from '$lib/kernel/content/parse';
 import type { ContentUnitKind } from '$lib/kernel/content/types';
+import { idiomaOuNulo } from '$lib/idiomas';
 
 /**
  * A busca do cabeçalho do Studio: atividades, materiais e turmas numa consulta
@@ -25,6 +26,8 @@ export interface ResultadoBusca {
 	titulo: string;
 	/** A linha de apoio: estado da atividade, tradução do material, nº de alunos. */
 	detalhe: string;
+	/** A tag de idioma (`$lib/idiomas.ts`) — atividade, material e turma têm a sua. */
+	idioma: string | null;
 }
 
 /** Teto por categoria: uma bandeja é para escolher de relance, não para paginar. */
@@ -89,7 +92,8 @@ export const buscarNoStudio = query(
 				id: atividade.id,
 				categoria: 'atividade',
 				titulo: atividade.title,
-				detalhe: noAr ? 'No ar' : 'Rascunho'
+				detalhe: noAr ? 'No ar' : 'Rascunho',
+				idioma: idiomaOuNulo(atividade.targetLang)
 			});
 		}
 
@@ -105,7 +109,13 @@ export const buscarNoStudio = query(
 							? [dados.title, dados.text.slice(0, 70)]
 							: [dados.lines[0]?.text ?? '', `${dados.lines.length} falas`];
 			if (!`${titulo} ${detalhe}`.toLocaleLowerCase().includes(alvo)) continue;
-			resultados.push({ id: unidade.id, categoria: 'material', titulo, detalhe });
+			resultados.push({
+				id: unidade.id,
+				categoria: 'material',
+				titulo,
+				detalhe,
+				idioma: idiomaOuNulo(unidade.targetLang)
+			});
 			if (resultados.filter((r) => r.categoria === 'material').length >= POR_CATEGORIA) break;
 		}
 
@@ -114,7 +124,8 @@ export const buscarNoStudio = query(
 				id: turma.id,
 				categoria: 'turma',
 				titulo: turma.name,
-				detalhe: turma._count.students === 1 ? '1 aluno' : `${turma._count.students} alunos`
+				detalhe: turma._count.students === 1 ? '1 aluno' : `${turma._count.students} alunos`,
+				idioma: idiomaOuNulo(turma.languageTag)
 			});
 		}
 

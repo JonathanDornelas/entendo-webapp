@@ -10,11 +10,36 @@
 	import { languageLabels } from '$lib/kernel/language/profiles';
 	import type { Skill } from '$lib/kernel/interactions/types';
 	import { criarAtividade } from '../atividades.remote';
+	import { NIVEIS, rotuloDoNivel, type NivelId } from '$lib/atividades/nivel';
+	import type { PageProps } from './$types';
+
+	let { data }: PageProps = $props();
+
+	/**
+	 * Por que não dá para criar — do estado do plano (antes de digitar) ou da
+	 * resposta do servidor (a trava de cota pode recusar mesmo com a tela
+	 * dizendo que cabia, se outra aba criou no meio).
+	 */
+	const bloqueio = $derived.by(() => {
+		const r = criarAtividade.result;
+		if (r && !r.ok) return { motivo: r.motivo, texto: r.error };
+		const motivo = data.acesso.motivo.criarAtividade;
+		if (!motivo) return null;
+		const { uso, limites } = data.acesso;
+		const texto =
+			motivo === 'criar'
+				? `Seu plano permite ${limites.atividades} atividades ao mesmo tempo, e você já tem ${uso.atividades}. Arquive uma que já foi usada — os resultados dela ficam — ou escolha um plano com mais espaço.`
+				: motivo === 'trial'
+					? 'O período de teste acabou. Nada foi apagado, e os links já publicados seguem abrindo — para criar de novo, escolha um plano.'
+					: 'Seu plano não permite criar atividades agora. Os links já publicados seguem abrindo.';
+		return { motivo, texto };
+	});
 
 	/** Os idiomas cadastrados, na ordem do profile — nunca escritos aqui. */
 	const idiomas = Object.keys(languageLabels);
 
 	let quantidade = $state(12);
+	let nivel = $state<NivelId | null>(null);
 	let escolhidas = $state<Skill[]>([...TODAS]);
 
 	// A lista vai num campo SÓ, separada por vírgula — mesmo padrão das
@@ -54,6 +79,29 @@
 				Só o essencial para começar. Tudo aqui pode mudar até você publicar.
 			</p>
 
+			{#if bloqueio}
+				<!-- O bloqueio vem ANTES dos campos: preencher tudo para descobrir no
+				     "Continuar" que não cabia é jogar o trabalho fora. -->
+				<div
+					class="mb-6 rounded-box border border-s-[3px] border-line border-s-error bg-base-200 px-4 py-3.5 text-[13.5px] leading-relaxed"
+					role="alert"
+				>
+					<p class="mb-2 font-bold">Não dá para criar uma atividade nova agora</p>
+					<p class="text-base-content/70">{bloqueio.texto}</p>
+					<p class="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+						{#if bloqueio.motivo === 'criar'}
+							<a href={resolve('/(studio)/atividades')} class="font-bold">Ver minhas atividades</a>
+						{/if}
+						{#if bloqueio.motivo}
+							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do motivo; a regra não enxerga a concatenação. -->
+							<a href={resolve('/(site)/planos') + '?motivo=' + bloqueio.motivo} class="font-bold"
+								>Ver os planos</a
+							>
+						{/if}
+					</p>
+				</div>
+			{/if}
+
 			<div class="grid gap-[18px]">
 				<label class="block">
 					<span class="mb-1.5 block text-[13px] font-semibold">Título</span>
@@ -78,7 +126,7 @@
 						<span class="mb-1.5 block text-[13px] font-semibold">Idioma alvo</span>
 						<select name="targetLang" class="select h-[52px] w-full text-[15px]">
 							{#each idiomas as rotulo (rotulo)}
-								<option selected={rotulo === 'Inglês (EUA)'}>{rotulo}</option>
+								<option selected={rotulo === data.padrao.alvo}>{rotulo}</option>
 							{/each}
 						</select>
 						<span class="mt-1.5 block text-[12.5px] text-base-content/65">
@@ -89,7 +137,7 @@
 						<span class="mb-1.5 block text-[13px] font-semibold">Idioma do aluno</span>
 						<select name="sourceLang" class="select h-[52px] w-full text-[15px]">
 							{#each idiomas as rotulo (rotulo)}
-								<option selected={rotulo === 'Português'}>{rotulo}</option>
+								<option selected={rotulo === data.padrao.aluno}>{rotulo}</option>
 							{/each}
 						</select>
 						<span class="mt-1.5 block text-[12.5px] text-base-content/65">
@@ -97,6 +145,35 @@
 						</span>
 					</label>
 				</div>
+
+				<!-- O nível é um RÓTULO (CEFR): organiza a lista, filtra e aparece para o
+				     aluno — não muda os exercícios gerados (adr-004-modulos-e-nivel.md).
+				     Opcional: "Sem nível" é o padrão e é uma resposta legítima. -->
+				<fieldset class="block border-0 p-0">
+					<legend class="mb-1.5 block text-[13px] font-semibold">
+						Nível <span class="font-normal text-base-content/65">(opcional)</span>
+					</legend>
+					<div class="flex flex-wrap gap-1.5">
+						{#each [null, ...NIVEIS.map((n) => n.id)] as id (id ?? 'sem')}
+							<button
+								type="button"
+								onclick={() => (nivel = id)}
+								aria-pressed={nivel === id}
+								title={id ? rotuloDoNivel(id) : 'Sem nível'}
+								class="rounded-full px-3.5 py-2 text-[13px] transition-[border-color,transform] duration-150 hover:-translate-y-0.5
+								       {nivel === id
+									? 'border-[1.5px] border-primary bg-base-300 font-bold text-primary'
+									: 'border border-line bg-base-200 font-semibold text-base-content/65'}"
+							>
+								{id ?? 'Sem nível'}
+							</button>
+						{/each}
+					</div>
+					<input type="hidden" name="level" value={nivel ?? ''} />
+					<span class="mt-1.5 block text-[12.5px] text-base-content/65">
+						{nivel ? rotuloDoNivel(nivel) : 'Um rótulo para você organizar e o aluno ver.'}
+					</span>
+				</fieldset>
 
 				<label class="block">
 					<span class="mb-1.5 block text-[13px] font-semibold">
@@ -221,6 +298,7 @@
 			     duplicaria. -->
 			<button
 				type="submit"
+				disabled={!!bloqueio || !!criarAtividade.pending}
 				class="btn h-[46px] flex-1 motion-tap gap-2.5 btn-primary font-bold lg:flex-none"
 			>
 				<span class="lg:hidden">Continuar</span>

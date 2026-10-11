@@ -9,24 +9,32 @@
 	import { page } from '$app/state';
 	import { parseAlunos } from '$lib/turmas/parse-alunos';
 	import { languageLabels } from '$lib/kernel/language/profiles';
+	import Loading from '$lib/components/Loading.svelte';
+	import {
+		CLASSE_DA_ETIQUETA,
+		CORES_DE_ETIQUETA,
+		etiquetaDaTurma,
+		NOME_DA_COR,
+		type CorDeEtiqueta
+	} from '$lib/etiquetas';
 	import { criarTurma } from '../turmas.remote';
+	import type { PageProps } from './$types';
+
+	let { data }: PageProps = $props();
 
 	interface LinhaUmAUm {
 		name: string;
 		email: string;
 	}
 
-	const CORES = [
-		{ id: 'violeta', chip: 'bg-primary' },
-		{ id: 'teal', chip: 'bg-accent' },
-		{ id: 'azul', chip: 'bg-info' },
-		{ id: 'magenta', chip: 'bg-[color-mix(in_oklab,var(--color-primary)_60%,var(--color-error))]' },
-		{ id: 'ardosia', chip: 'bg-base-content/45' }
-	];
-
 	let nome = $state('');
-	let idioma = $state('');
-	let cor = $state('violeta');
+	// Nasce no idioma que o professor ensina, quando é um só (o loader decide).
+	const idiomaDoPerfil = $derived(data.idiomaPadrao);
+	let idioma = $derived(idiomaDoPerfil);
+	let cor = $state<CorDeEtiqueta>('violeta');
+	/** Falha do servidor é DITA — o botão não pode só voltar ao normal sem explicação. */
+	let erro = $state<string | null>(null);
+	const sigla = $derived(nome.trim() ? etiquetaDaTurma(nome) : '7B');
 	// `?modo=lote` é a entrada "Colar uma lista de alunos" da lista vazia de turmas:
 	// quem chega por ela já tem a lista na mão e não deve clicar de novo aqui.
 	let modo = $state<'um' | 'lote'>(page.url.searchParams.get('modo') === 'lote' ? 'lote' : 'um');
@@ -89,7 +97,15 @@
 
 <div class="min-h-dvh bg-base-200 py-6 lg:py-8">
 	<form
-		{...criarTurma}
+		{...criarTurma.enhance(async ({ submit }) => {
+			erro = null;
+			try {
+				// Sucesso redireciona para a turma criada.
+				await submit();
+			} catch {
+				erro = 'Não deu para criar a turma agora. Tente de novo em instantes.';
+			}
+		})}
 		class="mx-auto flex min-h-[calc(100dvh-3rem)] w-full max-w-[52rem] flex-col overflow-hidden rounded-box border border-line bg-base-100 lg:min-h-[calc(100dvh-4rem)]"
 	>
 		<input type="hidden" name="modo" value={modo} />
@@ -192,17 +208,26 @@
 			</p>
 
 			<span class="mb-1.5 block text-[0.84rem] font-semibold">Cor da etiqueta</span>
-			<div class="mb-7 flex flex-wrap gap-2">
-				{#each CORES as opcao (opcao.id)}
+			<!-- A etiqueta com a sigla, como ela vai aparecer na lista e no cabeçalho
+			     — o mesmo seletor do módulo. -->
+			<div class="mb-7 flex flex-wrap gap-1.75">
+				{#each CORES_DE_ETIQUETA as opcao (opcao)}
 					<button
 						type="button"
-						onclick={() => (cor = opcao.id)}
-						aria-pressed={cor === opcao.id}
-						aria-label="Cor {opcao.id}"
-						class="grid size-8 place-items-center rounded-full border-2 transition-transform hover:-translate-y-0.5
-						       {cor === opcao.id ? 'border-base-content/40' : 'border-transparent'}"
+						onclick={() => (cor = opcao)}
+						aria-pressed={cor === opcao}
+						aria-label={NOME_DA_COR[opcao]}
+						title={NOME_DA_COR[opcao]}
+						class="grid size-11.5 place-items-center rounded-[11px] border-2 p-0 transition-colors {cor ===
+						opcao
+							? 'border-primary bg-base-200'
+							: 'border-line bg-base-100'}"
 					>
-						<span class="size-5 rounded-full {opcao.chip}"></span>
+						<span
+							class="grid size-8 place-items-center rounded-[8px] text-[11px] font-bold {CLASSE_DA_ETIQUETA[
+								opcao
+							]}">{sigla}</span
+						>
 					</button>
 				{/each}
 			</div>
@@ -326,6 +351,9 @@
 		<footer
 			class="flex shrink-0 flex-wrap items-center gap-3 border-t border-line px-gutter-sm py-3.5"
 		>
+			{#if erro}
+				<p class="w-full text-[0.84rem] font-semibold text-error" role="alert">{erro}</p>
+			{/if}
 			<span class="flex-1 text-[0.8rem] leading-snug text-base-content/65">
 				{comEmail}
 				{comEmail === 1 ? 'aluno vai poder receber' : 'alunos vão poder receber'} convite quando você
@@ -337,9 +365,15 @@
 			>
 			<button
 				type="submit"
-				disabled={nome.trim().length === 0}
+				disabled={nome.trim().length === 0 || criarTurma.pending > 0}
 				class="btn h-[2.9rem] motion-tap gap-2.5 btn-primary font-bold"
 			>
+				{#if criarTurma.pending > 0}<Loading
+						variant="fila"
+						size={10}
+						tone="current"
+						label="Criando"
+					/>{/if}
 				{total > 0 ? `Criar turma com ${total}` : 'Criar turma'}
 			</button>
 		</footer>

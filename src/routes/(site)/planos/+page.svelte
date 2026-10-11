@@ -6,23 +6,83 @@
 	// Cair numa página de preços sem entender o que se pediu tem uma leitura só,
 	// e é a pior: "quebrou e me jogou na cobrança". O aviso diz também o que
 	// NÃO se perdeu — o rascunho continua salvo, os links continuam no ar.
+	//
+	// **Não há gateway de pagamento** (docs/adr-002-billing.md): escolher um plano
+	// logado registra um PEDIDO e avisa a equipe, que combina o pagamento e ativa
+	// pelo painel interno. A tela diz isso com todas as letras — nada aqui libera
+	// acesso sozinho.
+	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import PlanosTabela from '$lib/components/PlanosTabela.svelte';
 	import SiteHero from '$lib/components/SiteHero.svelte';
-	import { ledePadrao, tituloPadrao, type PlanoId } from '$lib/content/planos';
-	import type { MotivoDoBloqueio } from './+page.server';
+	import {
+		ledePadrao,
+		tituloPadrao,
+		type CicloDeCobranca,
+		type PlanoId
+	} from '$lib/content/planos';
+	import { MOTIVOS_DE_LIMITE, type MotivoDoBloqueio } from '$lib/billing/motivos';
+	import { ehPlanoPago } from '$lib/billing/catalogo';
+	import type { ResumoDoAcesso } from '$lib/billing/resumo';
+	import { solicitarPlano } from '../../(studio)/conta/conta.remote';
 
 	interface PageData {
 		motivo: MotivoDoBloqueio | null;
 		motivos: Record<MotivoDoBloqueio, { titulo: string; texto: string }>;
 		planoAtual: PlanoId | null;
-		jaAssinante: boolean;
+		acesso: ResumoDoAcesso | null;
+		pedido: { id: PlanoId; nome: string; ciclo: string } | null;
 		logado: boolean;
 	}
 
 	let { data }: { data: PageData } = $props();
 
 	const aviso = $derived(data.motivo ? data.motivos[data.motivo] : null);
+
+	/** "Seu plano permite N; você tem M" — só nos motivos que são LIMITE. */
+	const limiteNaTela = $derived.by(() => {
+		const a = data.acesso;
+		if (!a || !data.motivo || !MOTIVOS_DE_LIMITE.includes(data.motivo)) return null;
+		if (data.motivo === 'criar') {
+			return `Seu plano permite ${a.limites.atividades} atividades ao mesmo tempo, e você tem ${a.uso.atividades}.`;
+		}
+		if (data.motivo === 'materiais') {
+			return `Seu plano permite ${a.limites.materiais} materiais na biblioteca, e você tem ${a.uso.materiais}.`;
+		}
+		return `Seu plano tem ${a.limites.creditosPorCiclo} créditos por mês, e o saldo deste ciclo é ${a.creditos.saldo}.`;
+	});
+
+	/**
+	 * O bloqueio NÃO é de cobrança: a conta pode publicar e o motivo não é limite.
+	 * Aí não é hora de vender nada — o caminho é voltar ao painel.
+	 */
+	const naoEhCobranca = $derived(
+		!!data.acesso &&
+			!!data.motivo &&
+			!MOTIVOS_DE_LIMITE.includes(data.motivo) &&
+			data.motivo !== 'ia' &&
+			data.acesso.pode.publicar
+	);
+
+	let pedidoEnviado = $state<string | null>(null);
+	let erroDoPedido = $state<string | null>(null);
+
+	async function escolher(plano: PlanoId, ciclo: CicloDeCobranca) {
+		erroDoPedido = null;
+		if (!ehPlanoPago(plano)) return;
+		try {
+			const r = await solicitarPlano({ plano, ciclo });
+			if (r.tipo === 'redirecionar') {
+				// Gateway: segue para o checkout. A confirmação vem pelo webhook.
+				window.location.assign(r.url);
+				return;
+			}
+			pedidoEnviado = plano;
+			await invalidateAll();
+		} catch {
+			erroDoPedido = 'Não deu para enviar o pedido agora. Tente de novo em instantes.';
+		}
+	}
 </script>
 
 <svelte:head>
@@ -63,12 +123,24 @@
 				<p class="max-w-[76ch] text-[13.5px] leading-relaxed text-pretty text-base-content/65">
 					{aviso.texto}
 				</p>
-
-				{#if data.jaAssinante}
-					<!-- Já pode publicar e ainda assim caiu aqui: não é hora de vender
-					     nada. O caminho é voltar ao painel. -->
+				{#if limiteNaTela}
+					<p class="mt-2 font-mono text-[13px] font-semibold">{limiteNaTela}</p>
+				{/if}
+				{#if data.motivo === 'criar'}
 					<p class="mt-3 text-[13px] leading-relaxed text-pretty">
-						Sua assinatura está ativa — este bloqueio não é de cobrança.
+						<a href={resolve('/(studio)/atividades')} class="font-bold">Ver minhas atividades</a> para
+						arquivar uma que já foi usada.
+					</p>
+				{:else if data.motivo === 'materiais'}
+					<p class="mt-3 text-[13px] leading-relaxed text-pretty">
+						<a href={resolve('/(studio)/materiais')} class="font-bold">Abrir a biblioteca</a> para liberar
+						espaço.
+					</p>
+				{/if}
+
+				{#if naoEhCobranca}
+					<p class="mt-3 text-[13px] leading-relaxed text-pretty">
+						Seu plano está em dia — este bloqueio não é de cobrança.
 						<a href={resolve('/(studio)/atividades')} class="font-bold">Voltar para as atividades</a
 						>
 						ou
@@ -79,13 +151,35 @@
 		</div>
 	{/if}
 
+	{#if data.pedido || pedidoEnviado}
+		<div
+			class="mb-6 rounded-box border border-warning/40 bg-warning/6 px-4 py-3.5 text-[13.5px] leading-relaxed lg:px-5"
+			role="status"
+		>
+			<strong>Pedido do plano {data.pedido?.nome ?? ''} enviado.</strong>
+			A equipe vai falar com você no seu e-mail para combinar o pagamento, e o plano é ativado assim que
+			ela confirmar. Mudou de ideia? Escolha outro plano abaixo, ou cancele o pedido em
+			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query da aba; a regra não enxerga a concatenação. -->
+			<a href={resolve('/(studio)/conta') + '?aba=assinatura'} class="font-bold">Conta</a>.
+		</div>
+	{/if}
+	{#if erroDoPedido}
+		<p class="mb-6 text-[13.5px] font-semibold text-error" role="alert">{erroDoPedido}</p>
+	{/if}
+
 	<!-- O cabeçalho da tabela seria o segundo título igual na mesma tela: o
 	     `SiteHero` acima já diz o mesmo. Só o seletor de ciclo faz falta, e ele
 	     vem dentro do cabeçalho — por isso ele fica, e o título não se repete. -->
-	<PlanosTabela planoAtual={data.planoAtual} titulo="Escolha o seu ciclo" lede="" />
+	<PlanosTabela
+		planoAtual={data.planoAtual}
+		titulo="Escolha o seu ciclo"
+		lede=""
+		onescolher={data.logado ? escolher : undefined}
+		pedidoPendente={data.pedido?.id ?? null}
+	/>
 
 	<!-- Quem não tem conta ainda: o caminho de sempre, que não passa por preço
-	     nenhum. Responder nunca exigiu conta, e criar começa de graça. -->
+	     nenhum. Responder nunca exigiu conta, e criar começa pelo teste. -->
 	{#if !data.logado}
 		<div
 			class="mt-[18px] rounded-[14px] border border-dashed border-line px-5 py-[18px] text-center"
@@ -94,8 +188,8 @@
 			<p
 				class="mx-auto mb-3.5 max-w-[62ch] text-[13px] leading-relaxed text-pretty text-base-content/65"
 			>
-				O plano Livre não pede cartão. Você monta uma atividade, manda o link para a turma e vê o
-				resultado — e decide depois.
+				Toda conta nova começa num período de teste, sem cartão. Você monta atividades, manda o link
+				para a turma e vê o resultado — e decide depois.
 			</p>
 			<a
 				href={resolve('/(auth)/cadastro')}
@@ -106,7 +200,9 @@
 
 	<p class="mt-6 text-center text-[12.5px] leading-relaxed text-pretty text-base-content/65">
 		Dúvida sobre qual plano serve para a sua escola?
-		<a href={resolve('/(site)/contato')} class="font-semibold">Fale com a gente</a> — a gente responde
-		com uma proposta pelo número de professores.
+		<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- rota resolvida mais a query do assunto; a regra não enxerga a concatenação. -->
+		<a href={resolve('/(site)/contato') + '?assunto=escolas'} class="font-semibold"
+			>Fale com a gente</a
+		> — a gente responde com uma proposta pelo número de professores.
 	</p>
 </main>

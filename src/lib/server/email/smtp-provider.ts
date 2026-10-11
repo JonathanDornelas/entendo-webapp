@@ -59,6 +59,7 @@ export const smtpEmailProvider: EmailProvider = {
 		await conexao().sendMail({
 			from: remetente(),
 			to: email.to,
+			replyTo: email.replyTo,
 			subject: email.subject,
 			text: email.text,
 			html: email.html,

@@ -1,10 +1,13 @@
 <script lang="ts">
+	import { caminhoInterno } from '$lib/caminho-interno';
 	import { goto } from '$app/navigation';
 	import Loading from '$lib/components/Loading.svelte';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/client/auth';
 	import { authAlunoClient } from '$lib/client/auth-aluno';
+	import { IDIOMAS } from '$lib/idiomas';
+	import { gravarMeusIdiomas } from '../../(studio)/conta/conta.remote';
 
 	// Criar conta — professor OU aluno, com o mesmo seletor de "/entrar". As duas
 	// contas são separadas por baixo (auth.md); o que muda aqui é a copy, o
@@ -23,16 +26,27 @@
 	let loading = $state(false);
 	let emailTaken = $state(false);
 	let erro = $state('');
-
-	function caminhoInterno(valor: string | null): string | null {
-		return valor && /^\/(?!\/)/.test(valor) ? valor : null;
+	/**
+	 * Os idiomas que o professor ensina — OPCIONAL. Não destrava nada: vira o
+	 * padrão da atividade nova, da turma nova e da biblioteca, para ninguém ter de
+	 * trocar "Inglês (EUA)" toda vez. Muda depois em Conta.
+	 */
+	let ensina = $state<string[]>([]);
+	function alternarIdioma(tag: string) {
+		ensina = ensina.includes(tag) ? ensina.filter((t) => t !== tag) : [...ensina, tag];
 	}
+
 	const voltar = $derived(caminhoInterno(page.url.searchParams.get('voltar')));
+	// `redirectTo` vem do guard do Studio (via a tela de entrar): quem abriu um
+	// link protegido — o convite de escola — sem ter conta volta para ele depois de
+	// criar a conta, em vez de cair na lista de atividades e perder o convite.
+	const redirectTo = $derived(caminhoInterno(page.url.searchParams.get('redirectTo')));
 	const queryDoEntrar = $derived(
 		'?' +
 			new URLSearchParams({
 				...(como === 'aluno' ? { como: 'aluno' } : {}),
-				...(voltar ? { voltar } : {})
+				...(voltar ? { voltar } : {}),
+				...(redirectTo ? { redirectTo } : {})
 			}).toString()
 	);
 
@@ -75,7 +89,22 @@
 				emailTaken = true;
 				return;
 			}
-			await goto(resolve('/(studio)/atividades'));
+			// A conta já existe e a sessão também: os idiomas vão por uma remote
+			// function da conta, filtrados no servidor. Falhar aqui não desfaz o
+			// cadastro — é um padrão, e ele se escolhe de novo em Conta.
+			if (ensina.length > 0) {
+				try {
+					await gravarMeusIdiomas({ idiomas: ensina });
+				} catch {
+					// segue: a conta foi criada
+				}
+			}
+			if (redirectTo) {
+				// eslint-disable-next-line svelte/no-navigation-without-resolve -- caminho validado contra redirect aberto (`caminhoInterno`); não é rota literal pra resolve() conferir.
+				await goto(redirectTo, { invalidateAll: true });
+			} else {
+				await goto(resolve('/(studio)/atividades'));
+			}
 			return;
 		}
 
@@ -215,6 +244,34 @@
 					>
 				{/if}
 			</label>
+
+			{#if como === 'professor'}
+				<fieldset class="border-0 p-0" disabled={loading}>
+					<legend class="mb-1.5 text-[13px] font-semibold">
+						Quais idiomas você ensina? <span class="font-normal text-base-content/65"
+							>(opcional)</span
+						>
+					</legend>
+					<div class="flex flex-wrap gap-1.5">
+						{#each IDIOMAS as idioma (idioma.tag)}
+							<button
+								type="button"
+								onclick={() => alternarIdioma(idioma.tag)}
+								aria-pressed={ensina.includes(idioma.tag)}
+								class="min-h-9 motion-tap rounded-full border px-3 text-[12.5px] font-semibold transition-colors {ensina.includes(
+									idioma.tag
+								)
+									? 'border-primary bg-primary text-primary-content'
+									: 'border-line bg-base-100 text-base-content/75 hover:border-primary'}"
+								>{idioma.rotulo}</button
+							>
+						{/each}
+					</div>
+					<span class="mt-1.5 block text-[12px] text-base-content/65"
+						>Vira o idioma padrão das suas atividades e turmas. Dá para mudar depois.</span
+					>
+				</fieldset>
+			{/if}
 
 			{#if erro}
 				<p

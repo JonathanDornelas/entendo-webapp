@@ -50,6 +50,20 @@ async function publicationOr404(slug: string) {
 	return publication;
 }
 
+/**
+ * A publicação ABERTA para começar algo novo. Atividade arquivada recusa
+ * (docs/adr-002-billing.md) — mas só aqui, nas portas de COMEÇAR: responder,
+ * retomar e finalizar continuam abertos, porque quem já estava respondendo
+ * termina com o que abriu.
+ */
+async function publicacaoAbertaOr410(slug: string) {
+	const publication = await publicationOr404(slug);
+	if (publication.activityVersion.activity.archivedAt) {
+		error(410, { message: 'Esta atividade foi encerrada', reason: 'unpublished' });
+	}
+	return publication;
+}
+
 type Publication = Awaited<ReturnType<typeof publicationOr404>>;
 
 /** A publicação só abre quando todo o áudio dela existe (server.md "TTS"). */
@@ -72,7 +86,7 @@ export const iniciarTentativa = form(
 		guardarAudio: z.string().optional()
 	}),
 	async ({ slug, displayName, guardarAudio }) => {
-		const publication = await publicationOr404(slug);
+		const publication = await publicacaoAbertaOr410(slug);
 		const settings = publicationSettingsSchema.parse(publication.settings);
 		await ensureAudioReady(publication);
 
@@ -163,7 +177,7 @@ export const retomarTentativa = form(z.object({ slug: z.string() }), async ({ sl
 });
 
 export const recomecarTentativa = form(z.object({ slug: z.string() }), async ({ slug }) => {
-	const publication = await publicationOr404(slug);
+	const publication = await publicacaoAbertaOr410(slug);
 	const { cookies } = getRequestEvent();
 
 	await playerRepo.discardResumable(publication.id, anonId());
@@ -185,7 +199,7 @@ export const naoSouEu = form(z.object({ slug: z.string() }), async ({ slug }) =>
 export const validarCodigo = form(
 	z.object({ slug: z.string(), code: z.string().min(1) }),
 	async ({ slug, code }) => {
-		const publication = await publicationOr404(slug);
+		const publication = await publicacaoAbertaOr410(slug);
 		const settings = publicationSettingsSchema.parse(publication.settings);
 
 		// O erro não conta quantas tentativas restam: o limite fica no

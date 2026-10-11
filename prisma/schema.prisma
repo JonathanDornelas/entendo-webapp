@@ -33,19 +33,48 @@ model Teacher {
   /// carregar "1-2-1-..." como endereço.
   avatar String?
 
+  /// Os idiomas que o professor ENSINA (tags de LanguageProfile, `$lib/idiomas.ts`).
+  /// Não muda nada do que ele pode fazer: é o PADRÃO da atividade nova, da turma
+  /// nova e da biblioteca — sem isso, toda atividade nascia em "Inglês (EUA)".
+  /// Opcional; vazio é o estado de quem não respondeu.
+  idiomas         String[] @default([])
+  /// A língua dos alunos — a "língua do aluno" padrão da atividade nova
+  /// (traduções e enunciados). Português para quase todo mundo; outra para quem
+  /// ensina português a estrangeiros.
+  idiomaDosAlunos String   @default("pt-BR")
+
+  /// O NOSSO id de plano (`basico` | `pro` | `super`, `$lib/billing/catalogo.ts`).
+  /// `scholar` nunca é gravado aqui: ele vem da filiação à escola. Quem escreve
+  /// estes campos é só `$lib/server/billing/assinaturas.ts` (docs/adr-002-billing.md).
   plan               String?
   subscriptionStatus String?
   currentPeriodEnd   DateTime?
   gracePeriodEnd     DateTime?
   stripeCustomerId   String?   @unique
 
-  sessions     Session[]
-  accounts     Account[]
-  activities   Activity[]
-  contentUnits ContentUnit[]
-  mediaAssets  MediaAsset[]
-  classrooms   Classroom[]
-  students     Student[]
+  /// Fim do trial. A situação "expirada" é DERIVADA desta data na leitura
+  /// (`entitlements.ts`), não escrita por um job que pudesse esquecer de rodar.
+  trialEndsAt       DateTime?
+  /// `mensal` | `anual` — o ciclo de COBRANÇA. Créditos renovam todo mês nos dois.
+  planCycle         String?
+  /// Âncora do ciclo mensal de créditos: o dia em que o plano foi ativado.
+  cycleAnchor       DateTime?
+  /// Cancelada "no fim do período": continua valendo até `currentPeriodEnd`.
+  cancelAtPeriodEnd Boolean   @default(false)
+
+  sessions         Session[]
+  accounts         Account[]
+  activities       Activity[]
+  contentUnits     ContentUnit[]
+  mediaAssets      MediaAsset[]
+  classrooms       Classroom[]
+  students         Student[]
+  auditEvents      AuditEvent[]
+  planRequests     PlanRequest[]
+  creditEntries    CreditEntry[]
+  modules          Module[]
+  /// A escola de que o professor faz parte, quando faz (uma por vez).
+  schoolMembership SchoolMembership?
 }
 
 model Session {
@@ -188,6 +217,11 @@ model ContentUnit {
   kind String // SentencePair | VocabItem | Passage | Dialogue
   data Json // formato depende de `kind` — valide com Zod ao ler, nunca confie no tipo do Prisma
 
+  /// A TAG DE IDIOMA do material: o idioma alvo (tag de `LanguageProfile`),
+  /// nulo = "sem idioma". Dentro de uma atividade ele é o dela; na biblioteca,
+  /// o professor escolhe (`$lib/idiomas.ts`). Validado ao ler (`idiomaOuNulo`).
+  targetLang String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -201,6 +235,7 @@ model ContentUnit {
   activities Activity[] @relation("AtividadeMaterial")
 
   @@index([teacherId])
+  @@index([teacherId, targetLang])
 }
 
 model MediaAsset {
@@ -263,11 +298,26 @@ model Activity {
   /// disponíveis.
   skills String[] @default(["listening", "speaking", "reading", "writing"])
 
+  /// Arquivada: sai do estoque do plano (libera a vaga) e o link FECHA para
+  /// quem ainda não começou — quem já está respondendo termina, e os resultados
+  /// ficam. É o jeito de liberar espaço sem apagar o que a turma fez
+  /// (docs/adr-002-billing.md). Nulo é o normal.
+  archivedAt DateTime?
+
+  /// O NÍVEL que o professor dá à atividade (CEFR, `$lib/atividades/nivel.ts`).
+  /// É um RÓTULO para organizar, filtrar e o aluno ver — não muda os exercícios
+  /// gerados (docs/adr-004-modulos-e-nivel.md). Nulo = sem nível. Fica na
+  /// atividade e não na versão: é metadado, como o título.
+  level String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   teacherId String
   teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  modules     ModuleActivity[]
+  moduleSends ModuleSend[]
 
   versions ActivityVersion[]
 
@@ -276,6 +326,7 @@ model Activity {
   contentUnits ContentUnit[] @relation("AtividadeMaterial")
 
   @@index([teacherId])
+  @@index([teacherId, archivedAt])
 }
 
 /// Imutável após criada — regra inviolável nº 7. Editar cria uma versão nova.
@@ -413,7 +464,7 @@ model AttemptItem {
   /// É a CHAVE no bucket, não uma URL: o objeto fica privado, e quem serve é
   /// uma rota do Studio que confere se o professor é dono da tentativa. Uma URL
   /// pública aqui seria a voz de um aluno acessível a quem tivesse o endereço.
-  audioKey String?
+  audioKey       String?
   /// Quando o bucket apaga a gravação. **7 dias**, contra os 10 do áudio de
   /// atividade: aquele é conteúdo do professor e se regenera sozinho, este é a
   /// voz de uma pessoa e não se recria — então vive o mínimo que ainda serve
@@ -457,8 +508,149 @@ model StripeEvent {
   createdAt DateTime @default(now())
 }
 
+/// O que mudou na cobrança (e, depois, na escola), quem mudou e quando. Toda
+/// operação de `$lib/server/billing/assinaturas.ts` grava uma linha na MESMA
+/// transação da mudança — sem isso o painel não responderia "por que esta conta
+/// está no Pro?".
+///
+/// `actor`: `sistema` | `professor` | `admin:<teacherId>` | `provedor`.
+model AuditEvent {
+  id        String   @id @default(cuid())
+  actor     String
+  type      String
+  data      Json // validado com Zod ao ler, como todo JSON (db.md)
+  createdAt DateTime @default(now())
+
+  teacherId String?
+  teacher   Teacher? @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([teacherId, createdAt])
+}
+
 // ---------------------------------------------------------------------------
-// Turmas e alunos — ver TURMAS-E-ALUNOS.md e .claude/rules/paginas.md.
+// Ambiente escolar (plano Scholar) — docs/adr-005-escola.md.
+//
+// A escola é uma ORGANIZAÇÃO dentro do produto: professores-membros usam o
+// mesmo Studio, e a coordenação ganha uma área própria. O contrato da escola
+// vence o plano próprio do membro enquanto vale. Cobrança por contrato, criada
+// e ajustada pelo painel interno.
+//
+// **A coordenação vê só NÚMEROS** (decisão do dono do repositório): por
+// professor e por turma, nunca nome de aluno nem resposta. O conteúdo continua
+// do professor — sair da escola não leva nada dele.
+// ---------------------------------------------------------------------------
+
+model School {
+  id     String @id @default(cuid())
+  name   String
+  /// `ativa` | `suspensa` | `encerrada`. Só `ativa` (e com contrato vigente) vale como plano.
+  status String @default("ativa")
+  /// Quantos professores cabem — coordenação inclusive.
+  seats  Int
+
+  /// Os limites POR PROFESSOR do contrato. O admin pode sobrescrever para um
+  /// membro específico (`SchoolMembership.*Max`).
+  atividadesPorProfessor Int
+  materiaisPorProfessor  Int
+  creditosPorProfessor   Int
+
+  /// Fim do contrato. Nulo = sem data de fim.
+  contractEndsAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members SchoolMembership[]
+  invites SchoolInvite[]
+}
+
+/// O professor DENTRO da escola. `teacherId` é único: um professor está em uma
+/// escola por vez, o que deixa "qual contrato vale" sem ambiguidade.
+model SchoolMembership {
+  id   String @id @default(cuid())
+  /// `coordenacao` | `professor`.
+  role String @default("professor")
+
+  /// Exceções de limite para ESTE professor, definidas pelo admin. Nulo = vale o da escola.
+  atividadesMax Int?
+  materiaisMax  Int?
+  creditosMax   Int?
+
+  createdAt DateTime @default(now())
+
+  schoolId  String
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacherId String  @unique
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+}
+
+/// O convite para entrar na escola. O TOKEN é a prova: foi para aquele e-mail e
+/// é imprevisível (≥128 bits). Uso único e com validade.
+model SchoolInvite {
+  id         String    @id @default(cuid())
+  email      String
+  role       String    @default("professor")
+  token      String    @unique
+  expiresAt  DateTime
+  sentAt     DateTime?
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+}
+
+/// Os créditos de IA como LIVRO-RAZÃO: só lançamentos, nenhum contador
+/// (docs/adr-003-ia-gemini.md). O saldo é a franquia do plano em vigor MAIS a
+/// soma dos lançamentos do ciclo atual (`cicloInicio`) — então virar o mês não
+/// exige escrita nenhuma (não há "reset" que possa correr mal), trocar de plano
+/// no meio do ciclo vale na hora, e o saldo nunca diverge do histórico.
+///
+/// `refKey` torna cada movimento idempotente: o débito usa o `requestId` que o
+/// cliente gerou (clique duplo = um débito só), o estorno `<requestId>:estorno`.
+model CreditEntry {
+  id          String   @id @default(cuid())
+  /// Início do ciclo mensal a que o lançamento pertence (`$lib/billing/ciclo.ts`).
+  cicloInicio DateTime
+  /// Negativo gasta, positivo devolve ou concede.
+  delta       Int
+  motivo      String // geracao_ia | estorno | cortesia | ajuste
+  refKey      String   @unique
+  createdAt   DateTime @default(now())
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([teacherId, cicloInicio])
+}
+
+/// O pedido de plano enquanto não existe gateway de pagamento
+/// (docs/adr-002-billing.md): o professor escolhe na tela de planos, a equipe
+/// recebe o aviso, combina o pagamento e ATENDE pelo painel interno — que é o
+/// que ativa o plano.
+model PlanRequest {
+  id         String    @id @default(cuid())
+  plano      String // basico | pro | super
+  ciclo      String // mensal | anual
+  status     String    @default("pendente") // pendente | atendido | cancelado
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+  /// O admin que atendeu ou cancelou (id de Teacher). Nulo quando foi o próprio professor.
+  resolvedBy String?
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([teacherId])
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Turmas e alunos — ver .claude/rules/paginas.md "Turmas e alunos".
 //
 // A regra que rege tudo aqui: **convite e link aberto coexistem**. Cadastrar a
 // turma serve para o aluno chegar com o nome certo no relatório e para o
@@ -483,6 +675,7 @@ model Classroom {
 
   students   Student[]
   deliveries Delivery[]
+  modulos    ModuleClassroom[]
 
   @@index([teacherId])
 }
@@ -520,11 +713,124 @@ model Student {
   @@index([accountId])
 }
 
+/// Um MÓDULO: coleção ordenada de atividades do professor — "Intermediário",
+/// "Frutas" (docs/adr-004-modulos-e-nivel.md). N:N de propósito: a mesma
+/// atividade pode estar em "Frutas" e em "Intermediário". É organização do
+/// professor e uma forma de mandar várias atividades de uma vez para a turma; o
+/// aluno não vê "módulo" como entidade.
+model Module {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  /// Etiqueta de cor — a mesma paleta das turmas, nunca verde nem âmbar.
+  color       String  @default("violeta")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  activities ModuleActivity[]
+  deliveries Delivery[]
+  turmas     ModuleClassroom[]
+
+  @@index([teacherId])
+}
+
+/// A atividade dentro do módulo, na posição que o professor deu. Apagar o
+/// módulo não apaga atividade nenhuma — só o vínculo.
+model ModuleActivity {
+  position Int
+  addedAt  DateTime @default(now())
+
+  moduleId   String
+  module     Module   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
+  @@id([moduleId, activityId])
+  @@index([activityId])
+}
+
+/// A turma ALOCADA ao módulo (docs/telas-modulos-professor.md 2.3). Só turma
+/// alocada recebe envio do módulo, e é a alocação que põe o módulo no mapa dos
+/// alunos dela. Carrega a programação de envio daquela turma.
+model ModuleClassroom {
+  id String @id @default(cuid())
+
+  /// A programação (`programacaoSchema`, `$lib/modulos/programacao.ts`), validada
+  /// por Zod ao ler. Nula = alocada e ainda sem programação.
+  schedule Json?
+  /// Pausada: nada sai até retomar, e retomar recomeça as datas de hoje.
+  pausedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  moduleId    String
+  module      Module    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+
+  sends ModuleSend[]
+
+  @@unique([moduleId, classroomId])
+  @@index([classroomId])
+}
+
+/// Uma atividade do módulo, para UMA turma alocada, com a data em que sai e o
+/// desfecho. Uma linha por (alocação, atividade): a atividade sai UMA vez por
+/// turma pelo módulo, e é essa unicidade que torna o envio idempotente — o job
+/// que roda duas vezes encontra a linha já `enviada`.
+model ModuleSend {
+  id String @id @default(cuid())
+
+  /// programada | enviada | nao_saiu | pulada
+  status   String    @default("programada")
+  /// Quando sai (instante, já no fuso de Brasília).
+  dueAt    DateTime
+  /// Por que não saiu: `rascunho`, `arquivada` ou `audio`.
+  reason   String?
+  /// Quantas vezes o envio já tentou sair — teto para a re-tentativa do áudio.
+  attempts Int       @default(0)
+  sentAt   DateTime?
+  /// E-mails enfileirados naquele envio (um por aluno com e-mail).
+  emails   Int?
+  /// O `Delivery.envioId` do envio que levou esta atividade.
+  envioId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  allocationId String
+  allocation   ModuleClassroom @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+  activityId   String
+  activity     Activity        @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
+  @@unique([allocationId, activityId])
+  @@index([status, dueAt])
+}
+
 /// O ato de mandar uma publicação para uma turma. Guardado porque o histórico
 /// da turma é "o que foi enviado, quando, e quantos abriram".
 model Delivery {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
+
+  /// Envio de MÓDULO: todos os `Delivery` de um mesmo clique em "Enviar módulo"
+  /// para uma turma levam o mesmo `envioId`, e é por ele que o histórico da
+  /// turma agrupa ("Módulo Frutas · 4 atividades") e que o aluno recebe UM
+  /// e-mail com todos os links. Nulo no envio de uma atividade só.
+  envioId  String?
+  moduleId String?
+  module   Module? @relation(fields: [moduleId], references: [id], onDelete: SetNull)
+
+  /// O envio AVISOU por e-mail? Falso quando a programação do módulo é "só
+  /// disponibilizar" (`canal: 'mapa'`): os convites existem — o link pessoal e o
+  /// mapa do aluno funcionam —, mas ninguém recebeu e-mail. A chamada da turma
+  /// lê isto para não dizer "Enviado" a quem não recebeu nada.
+  porEmail Boolean @default(true)
 
   publicationId String
   publication   Publication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
@@ -535,6 +841,7 @@ model Delivery {
   invites Invite[]
 
   @@index([classroomId])
+  @@index([envioId])
   @@index([publicationId])
 }
 

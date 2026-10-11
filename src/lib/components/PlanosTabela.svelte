@@ -3,13 +3,19 @@
 	// tivesse a sua, as duas divergiam no primeiro ajuste de preço.
 	//
 	// **Os preços são placeholder** e vivem em `$lib/content/planos.ts`, nunca
-	// aqui: nome, valor e o que cada plano libera são pendência de produto
-	// (billing.md). Este componente desenha o que aquele arquivo diz.
+	// aqui; os LIMITES saem de `$lib/billing/catalogo.ts` através dele. Este
+	// componente desenha o que aquele arquivo diz.
+	//
+	// **Não decide o que "assinar" faz.** Quem está logado aperta o CTA e a
+	// PÁGINA recebe `onescolher(plano, ciclo)` — sem gateway, ela registra um
+	// pedido (adr-002-billing.md). Sem `onescolher` (a home, quem não tem conta)
+	// o CTA leva ao cadastro. O Scholar é por contrato e leva sempre ao contato.
 	//
 	// **O plano ATUAL ganha o destaque de "seu plano agora"**, e o destaque de
 	// marketing cede a vez: dizer "o mais escolhido" no cartão de quem já
 	// assinou aquele plano é propaganda para dentro.
 	import { resolve } from '$app/paths';
+	import Loading from './Loading.svelte';
 	import {
 		garantias,
 		alunoNaoPaga,
@@ -30,7 +36,11 @@
 		titulo = tituloPadrao,
 		lede = ledePadrao,
 		/** Menos respiro, para caber dentro de outra seção. */
-		compacto = false
+		compacto = false,
+		/** Logado: o CTA chama isto em vez de levar ao cadastro. */
+		onescolher,
+		/** O plano já pedido e ainda não atendido — o cartão dele diz "pedido enviado". */
+		pedidoPendente = null
 	}: {
 		planoAtual?: PlanoId | null;
 		mostrarCabecalho?: boolean;
@@ -38,7 +48,22 @@
 		titulo?: string;
 		lede?: string;
 		compacto?: boolean;
+		onescolher?: (plano: PlanoId, ciclo: CicloDeCobranca) => Promise<void>;
+		pedidoPendente?: PlanoId | null;
 	} = $props();
+
+	/** O id do plano cujo pedido está indo ao servidor — o botão mostra a fila. */
+	let escolhendo = $state<PlanoId | null>(null);
+
+	async function escolher(plano: PlanoId) {
+		if (!onescolher || escolhendo) return;
+		escolhendo = plano;
+		try {
+			await onescolher(plano, ciclo);
+		} finally {
+			escolhendo = null;
+		}
+	}
 
 	// Mensal é o padrão porque é o número que a pessoa compara primeiro; o anual
 	// é a economia, e ela só interessa depois de o mensal parecer aceitável.
@@ -47,7 +72,8 @@
 	const ICONES: Record<string, string> = {
 		spark: 'M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z',
 		person: 'M12 11.5a3.6 3.6 0 100-7.2 3.6 3.6 0 000 7.2zM5 20c0-3.4 3.1-5.5 7-5.5s7 2.1 7 5.5',
-		school: 'M12 3.5l9 4.5-9 4.5-9-4.5zM6 11v5.5c0 1.7 2.7 3 6 3s6-1.3 6-3V11'
+		school: 'M12 3.5l9 4.5-9 4.5-9-4.5zM6 11v5.5c0 1.7 2.7 3 6 3s6-1.3 6-3V11',
+		bolt: 'M13.5 3L5 13.5h6L10.5 21 19 10.5h-6z'
 	};
 
 	const cartoes = $derived(
@@ -63,10 +89,14 @@
 				// "Seu plano agora" vence o selo de marketing: é informação sobre a
 				// conta de quem está lendo, não uma recomendação de venda.
 				faixa: atual ? 'Seu plano agora' : p.destaque,
-				ctaAgora: atual ? 'Gerenciar cobrança' : p.cta,
-				ctaNotaAgora: atual
-					? 'Você já está neste plano. A troca vale a partir da próxima cobrança.'
-					: p.ctaNota
+				pedido: pedidoPendente === p.id,
+				ctaAgora: pedidoPendente === p.id ? 'Pedido enviado' : atual ? 'Renovar este plano' : p.cta,
+				ctaNotaAgora:
+					pedidoPendente === p.id
+						? 'A equipe vai falar com você para combinar o pagamento.'
+						: atual
+							? 'Você já está neste plano. Renovar registra um pedido para a equipe.'
+							: p.ctaNota
 			};
 		})
 	);
@@ -197,7 +227,7 @@
 				</p>
 				<p
 					class="min-h-[34px] text-[12.5px] leading-normal text-pretty
-					       {ciclo === 'anual' && p.id !== 'livre' ? 'text-base-content' : 'text-base-content/65'}"
+					       {ciclo === 'anual' && !p.porContrato ? 'text-base-content' : 'text-base-content/65'}"
 				>
 					{p.notaAgora}
 				</p>
@@ -236,16 +266,38 @@
 			</div>
 
 			<div class="shrink-0 {compacto ? 'px-4 pb-4' : 'px-[22px] pb-[22px]'}">
-				<!-- PENDÊNCIA: sem provedor de cobrança não há checkout. O botão leva
-				     ao cadastro (ou ao contato, no Escola) — nunca a um checkout que
-				     não existe (billing.md). -->
-				<a
-					href={p.id === 'escola' ? resolve('/(site)/contato') : resolve('/(auth)/cadastro')}
-					class="btn min-h-12 w-full motion-tap gap-2.5 text-[14.5px] font-bold no-underline
-					       {p.atual ? 'btn-plain' : p.herói ? 'btn-primary' : 'btn-outline'}"
-				>
-					{p.ctaAgora}
-				</a>
+				{#if p.porContrato}
+					<!-- eslint-disable svelte/no-navigation-without-resolve -- rota resolvida mais a query do assunto; a regra não enxerga a concatenação. -->
+					<a
+						href={resolve('/(site)/contato') + '?assunto=escolas'}
+						class="btn min-h-12 w-full motion-tap gap-2.5 btn-outline text-[14.5px] font-bold no-underline"
+					>
+						{p.ctaAgora}
+					</a>
+					<!-- eslint-enable svelte/no-navigation-without-resolve -->
+				{:else if onescolher}
+					<!-- Sem gateway (adr-002-billing.md): a página registra um pedido. -->
+					<button
+						type="button"
+						onclick={() => escolher(p.id)}
+						disabled={escolhendo !== null || p.pedido}
+						class="btn min-h-12 w-full motion-tap gap-2.5 text-[14.5px] font-bold
+						       {p.atual || p.pedido ? 'btn-plain' : p.herói ? 'btn-primary' : 'btn-outline'}"
+					>
+						{#if escolhendo === p.id}
+							<Loading variant="fila" size={10} tone="current" label="Enviando o pedido" />
+						{/if}
+						{p.ctaAgora}
+					</button>
+				{:else}
+					<a
+						href={resolve('/(auth)/cadastro')}
+						class="btn min-h-12 w-full motion-tap gap-2.5 text-[14.5px] font-bold no-underline
+						       {p.atual ? 'btn-plain' : p.herói ? 'btn-primary' : 'btn-outline'}"
+					>
+						{p.ctaAgora}
+					</a>
+				{/if}
 				<p class="mt-2.5 text-center text-xs leading-normal text-pretty text-base-content/65">
 					{p.ctaNotaAgora}
 				</p>

@@ -4,6 +4,7 @@ import {
 	CODIGO_PADRAO,
 	LADO,
 	LIMITES,
+	avatarPadrao,
 	decodificar,
 	montarAvatar,
 	normalizar,
@@ -258,5 +259,30 @@ describe('sortearCodigo', () => {
 		// 30% por desenho — com acessório sempre presente, todo avatar sorteado
 		// vinha de capacete e o rosto ficava escondido.
 		expect(comSegundo / total).toBeLessThan(0.4);
+	});
+});
+
+describe('avatarPadrao — quem não tem avatar gravado', () => {
+	it('é sempre o mesmo rosto para o mesmo nome', () => {
+		expect(avatarPadrao('Juliana Prado')).toBe(avatarPadrao('Juliana Prado'));
+	});
+
+	it('é um código válido, já na forma que iria para o banco', () => {
+		for (const nome of ['Ana', 'Pedro Alves', '佐藤 明', 'محمد', '']) {
+			const codigo = avatarPadrao(nome);
+			expect(codigo.split('-')).toHaveLength(CASAS);
+			expect(normalizar(codigo)).toBe(codigo);
+		}
+	});
+
+	it('nomes diferentes dão rostos diferentes (quase sempre)', () => {
+		const nomes = Array.from({ length: 40 }, (_, i) => `Aluno ${i}`);
+		expect(new Set(nomes.map(avatarPadrao)).size).toBeGreaterThan(38);
+	});
+
+	it('"José" composto e pré-composto são a mesma pessoa', () => {
+		const preComposto = 'Jos\u00e9';
+		const composto = 'Jose\u0301';
+		expect(avatarPadrao(composto)).toBe(avatarPadrao(preComposto));
 	});
 });

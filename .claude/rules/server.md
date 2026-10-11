@@ -57,6 +57,29 @@ lista, editar e apagar), `(studio)/resultados/resultados.remote.ts` (`comentarRe
 `apagarTentativa` — a correção deixou de ser uma fila e virou uma ação em cima da resposta) e
 `(studio)/studio.remote.ts` (`buscarNoStudio`, a busca do cabeçalho).
 
+Os que vieram com planos, módulos e escola, cada um com o seu guard:
+
+- `(studio)/conta/conta.remote.ts` — `solicitarPlano`, `cancelarPedido`, `agendarCancelamento`,
+  `desfazerCancelamento`, `sairDaEscola`. O id vem da sessão.
+- `(studio)/materiais/ia.remote.ts` — `gerarPropostasIa` e `aceitarPropostasIa` (ver "IA" abaixo).
+- `(studio)/modulos/modulos.remote.ts` — CRUD de módulo (com `duplicarModulo`: atividades e ordem, sem
+  turmas nem programação), acrescentar/remover/reordenar, as turmas
+  do módulo (`alocarTurmas`, `desalocarTurma`) e a programação de envio (`salvarProgramacao`,
+  `pausarProgramacao`, `enviarAgora`, `tentarDeNovo`). Tudo delega para
+  `$lib/server/modulos/programacao.ts`, que é testável sem SvelteKit; o envio em si (preparar e
+  despachar) é `$lib/server/modulos/enviar.ts`. Ver "Programação de envio" abaixo.
+- `(studio)/escola/escola.remote.ts` — `requireCoordenacao` em convidar, revogar e remover;
+  `requireTeacher` no `aceitarConvite`.
+- `(admin)/admin/admin.remote.ts` — **`requirePlatformAdmin` em toda função** (remote function não
+  passa pelo hook): ativar plano, trial, cancelar, atender pedido, créditos de cortesia, escolas,
+  reenfileirar job.
+- `atividades.remote.ts` ganhou `arquivarAtividade`, `desarquivarAtividade` (dentro da cota),
+  `apagarAtividade` (confere o título digitado) e `definirNivel`.
+
+**Lógica que precisa de teste mora em `$lib/server`, não no `.remote.ts`.** O SvelteKit recusa
+importar um `.remote.ts` cujos exports não são remote functions de verdade — então a remote confere a
+sessão e delega (`enviarModulo`, `gerarPropostas`, `gravarMateriais`, `assinaturas.ts`).
+
 `comentarResposta` escreve com `updateMany` e o escopo no `where`, não `update` por id: é esse
 filtro que impede um POST direto de comentar a resposta de outro professor, e um `findFirst`
 antes seria uma checagem que a corrida entre as duas consultas poderia furar.
@@ -97,8 +120,18 @@ Regras:
 
 ## E-mail
 
-Um e-mail transacional só: o convite do aluno. `server/email/` — `index.ts` escolhe o provedor,
-`smtp-provider.ts` envia, `convite-aluno.ts` monta a mensagem.
+`server/email/` — `index.ts` escolhe o provedor, `smtp-provider.ts` envia, e cada e-mail tem o seu
+montador sobre `base.ts` (moldura, cores, `escaparHtml`): `convite-aluno.ts`, `convite-modulo.ts`
+(UM e-mail por aluno com todos os links do módulo), `convite-escola.ts`, `redefinir-senha.ts` (o link
+de "esqueci a senha" das duas contas — ver auth.md "Senha") e `aviso-equipe.ts`
+(pedido de plano e formulário de contato, para `CONTATO_PARA`, com Reply-To de quem escreveu).
+
+**Todo texto que veio de uma pessoa passa por `escaparHtml`** antes de entrar no HTML — nome de
+professor, título de atividade, de turma, de módulo, de escola, mensagem de contato. O convite do
+aluno injetava esses nomes crus; um título com `<a href>` virava link no e-mail da turma inteira.
+
+O formulário de contato tem campo-isca e limite por IP (`$lib/server/limite-por-ip.ts`): cada
+mensagem é um e-mail, e o plano grátis do Resend dá 100 por dia — um robô travaria os convites.
 
 **SMTP, e não a API de um provedor.** Todo serviço fala SMTP — Resend, Brevo, Mailgun, Gmail com
 senha de app —, e escolher a API de um deles amarraria o produto a um fornecedor para ganhar
@@ -139,6 +172,11 @@ que é a primitiva que dá exclusão mútua entre workers concorrentes.
 Job { id, type, payload JSON, status, attempts, lockedUntil, runAfter, lastError }
 ```
 
+Tipos: `tts`, `convite`, `convite-modulo`, `convite-escola`, `aviso-equipe`, `envio-programado`, `redefinir-senha`. Cada um tem o schema e o
+`enqueue…` em `server/queue/index.ts` e o caso em `worker/index.ts`. **Suba o worker antes (ou junto)
+do web** quando criar um tipo: tipo desconhecido lança erro e vai para `failed`. Os jobs falhados
+aparecem no painel interno (`/admin`), com "Tentar de novo".
+
 Regras: todo job é idempotente, tem número máximo de tentativas, e falha com backoff.
 Um job que estourou as tentativas vai para `failed` e aparece no painel — nunca some em silêncio.
 
@@ -154,6 +192,29 @@ espera é de REDE: trinta convites em série são trinta idas e voltas somadas. 
 ajusta, e o teto de verdade do TTS continua sendo a máquina do serviço de áudio.
 
 Se o volume crescer a ponto de o poll pesar, aí sim BullMQ. Não antes.
+
+### Programação de envio — job agendado, sem cron
+
+O envio programado de um módulo (`docs/adr-004-modulos-e-nivel.md`, atualização) usa a própria fila:
+cada instante programado vira um job `envio-programado` com `runAfter`. **O job só diz QUAL alocação
+acordar** (`{ allocationId }`); o que sai é decidido pelo banco na hora, em `processarEnviosDevidos`.
+Por isso reprogramar não precisa achar e apagar job velho: ele acorda, não encontra nada devido e
+termina. As regras que seguram isso:
+
+- **A data vem de `agendar`** (`$lib/modulos/programacao.ts`, pura), a mesma conta que a prévia da
+  tela faz. Datas são texto `AAAA-MM-DD` e o instante sai de `instanteDe`, em Brasília.
+- **Cada `ModuleSend` é reivindicado com `updateMany` condicionado ao estado lido** (`status` +
+  `updatedAt`) antes de despachar: dois workers acordados no mesmo instante não mandam o mesmo
+  e-mail. Se o despacho falhar, as linhas voltam para `programada` e o job tenta de novo.
+- **O que não pode sair vira `nao_saiu` com o motivo, e não pula para a seguinte.** Áudio faltando
+  agenda uma nova tentativa em 5 minutos (até 6); rascunho é destravado por `publicarAtividade`
+  (`liberarEnviosQueEsperavamPublicacao`).
+- **O canal é da programação** (`Programacao.canal`, `email` | `mapa`, padrão `email` — o que já
+  estava gravado continua mandando e-mail). Em `mapa`, `despacharEnvio` cria os convites para todos
+  os alunos, grava `Delivery.porEmail = false` e não enfileira `convite-modulo`; `cargaPorDia` não
+  conta essa alocação no teto de 100 e-mails.
+- **O worker monta os links do e-mail com `ORIGIN`** (ou `BETTER_AUTH_URL`), porque não há request.
+  Na tela ("tudo agora", "enviar agora") vale a origem do request, como no envio de atividade.
 
 ## TTS
 
@@ -307,6 +368,21 @@ browser dele já desistiu, mas o servidor continua trabalhando para ninguém.
 
 Do lado de cá o 503 já tem tratamento: em `speak` ele vira a mensagem de pular a questão, e o
 worker da publicação tenta de novo com backoff.
+
+## IA — "Gerar com IA" (Gemini)
+
+`docs/adr-003-ia-gemini.md`. Resumo das regras:
+
+- A IA **propõe material**, nunca exercício, e nada entra na biblioteca antes de o professor marcar e
+  confirmar. Aceitar passa por `gravarMateriais` (cota de estoque, reaproveitamento).
+- Atrás de interface própria (`server/ia/provider.ts`); `LLM_PROVIDER` vazio = desligada. O id do
+  modelo vem de `GEMINI_MODEL`, nunca do código.
+- Saída estruturada (`responseJsonSchema` saído do mesmo Zod que valida a volta) e **revalidação de
+  tudo** contra `contentUnitSchemas` — o provedor não é confiável para dizer que respeitou o formato.
+- O prompt só leva rótulos de idioma do `LanguageProfile` (sem `if` por idioma) e o texto do
+  professor delimitado, como dado. Nunca dado de aluno, nunca a nota privada do professor.
+- Créditos: débito ANTES da chamada (transação curta, `refKey` = `requestId` do cliente), chamada
+  FORA da transação com teto de tempo, estorno do que não serviu.
 
 ## Mídia
 

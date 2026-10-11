@@ -7,12 +7,15 @@
 	// grava o mesmo `ContentUnit` (os dois passam por `montarMaterial`). Aqui
 	// ele é um painel sobre a lista, que é onde o professor confere se o que
 	// acabou de digitar já estava lá.
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/state';
 	import Loading from '$lib/components/Loading.svelte';
 	import MaterialForm, { type Modo } from '$lib/components/MaterialForm.svelte';
 	import MaterialList from '$lib/components/MaterialList.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
+	import FiltroIdioma from '$lib/components/FiltroIdioma.svelte';
+	import { casaComFiltro } from '$lib/idiomas';
 	import { TIPOS, type MaterialKind, type MaterialRow } from '$lib/components/material-form';
 	import { withMock } from '$lib/dev/with-mock';
 	import {
@@ -21,11 +24,18 @@
 		criarMaterial,
 		criarMateriaisEmLote
 	} from './materiais.remote';
+	import { aceitarPropostasIa, gerarPropostasIa } from './ia.remote';
+	import type { ResultadoMaterial } from '$lib/components/MaterialForm.svelte';
+	import type { EstadoDaIa, RespostaDaGeracao } from '$lib/billing/ia';
+	import type { ContentUnitKind } from '$lib/kernel/content/types';
 
 	interface PageData {
 		materials: MaterialRow[];
 		usedInCount: number;
-		langFilters: string[];
+		/** O idioma com que um material novo nasce — o que o professor mais usa. */
+		idiomaPadrao: string | null;
+		ia: EstadoDaIa;
+		iaIdiomas: { alvo: string; origem: string };
 	}
 
 	const MOCK: PageData = {
@@ -35,7 +45,7 @@
 				kind: 'pair',
 				primary: 'She has been working here since 2019.',
 				secondary: 'Ela trabalha aqui desde 2019.',
-				language: 'Inglês',
+				idioma: 'en-US',
 				usedIn: 2,
 				target: 'She has been working here since 2019.',
 				source: 'Ela trabalha aqui desde 2019.',
@@ -47,7 +57,16 @@
 			}
 		],
 		usedInCount: 1,
-		langFilters: ['Inglês']
+		idiomaPadrao: 'en-US',
+		ia: {
+			configurada: false,
+			pode: false,
+			motivo: 'ia',
+			saldo: 0,
+			custoPorProposta: 1,
+			idiomas: null
+		},
+		iaIdiomas: { alvo: 'en-US', origem: 'pt-BR' }
 	};
 
 	let { data: dataProp }: { data?: Partial<PageData> } = $props();
@@ -56,7 +75,7 @@
 	// Filtros são só de tela: a biblioteca inteira é do professor e já veio no
 	// loader — uma ida ao servidor por clique de chip não compraria nada.
 	let filtroKind = $state<MaterialKind | null>(null);
-	let filtroLang = $state<string | null>(null);
+	let filtroIdioma = $state('');
 	let busca = $state('');
 	let pagina = $state(1);
 	const POR_PAGINA = 12;
@@ -64,7 +83,7 @@
 	const visiveis = $derived(
 		data.materials.filter((m) => {
 			if (filtroKind && m.kind !== filtroKind) return false;
-			if (filtroLang && m.language !== filtroLang) return false;
+			if (!casaComFiltro(m.idioma ?? null, filtroIdioma)) return false;
 			const termo = busca.trim().toLowerCase();
 			if (!termo) return true;
 			return m.primary.toLowerCase().includes(termo) || m.secondary.toLowerCase().includes(termo);
@@ -79,7 +98,7 @@
 	// resultado encolher para 4 linhas deixava a tabela vazia sem explicação.
 	$effect(() => {
 		void filtroKind;
-		void filtroLang;
+		void filtroIdioma;
 		void busca;
 		pagina = 1;
 	});
@@ -89,6 +108,8 @@
 	let formulario = $state<MaterialForm | null>(null);
 	let modo = $state<Modo>('um');
 	let editando = $state<MaterialRow | null>(null);
+	/** A tag de idioma escolhida no formulário — vale também para a IA. */
+	let idioma = $state<string | null>(null);
 	let salvando = $state(false);
 	let apagandoId = $state<string | null>(null);
 	/** Confirmação antes de apagar: a consequência vai escrita, não num alert(). */
@@ -104,6 +125,13 @@
 		painel = true;
 		formulario?.editar(m);
 	}
+	// O "Criar com IA" do início chega com `?novo=ia`: o painel abre já no modo
+	// da IA, em vez de deixar o professor procurar a aba depois de chegar.
+	onMount(async () => {
+		if (page.url.searchParams.get('novo') !== 'ia') return;
+		await abrirNovo();
+		modo = 'ia';
+	});
 	function fechar() {
 		painel = false;
 		formulario?.limpar();
@@ -133,6 +161,39 @@
 		})
 	);
 
+	// ── gerar com IA ── A página fala com o servidor; o componente só desenha
+	// (components.md "Convenções"). O `requestId` sai daqui: é ele que torna o
+	// débito idempotente — um clique duplo não paga duas vezes.
+	let resultadoIa = $state<ResultadoMaterial | undefined>(undefined);
+
+	async function gerarIa(pedido: {
+		kind: ContentUnitKind;
+		texto: string;
+		quantos: 5 | 10 | 20;
+	}): Promise<RespostaDaGeracao> {
+		const r = await gerarPropostasIa({
+			requestId: crypto.randomUUID(),
+			kind: pedido.kind,
+			pedido: pedido.texto,
+			quantos: pedido.quantos,
+			sourceLang: data.iaIdiomas.origem,
+			// A IA escreve no idioma escolhido no formulário (a tag do material).
+			targetLang: idioma || data.iaIdiomas.alvo
+		});
+		return r.ok ? { ok: true, propostas: r.propostas, saldo: r.saldo } : r;
+	}
+
+	async function aceitarIa(kind: ContentUnitKind, dados: Record<string, unknown>[]) {
+		const r = await aceitarPropostasIa({
+			kind,
+			propostas: dados,
+			idioma: idioma || data.iaIdiomas.alvo
+		});
+		resultadoIa = r;
+		if (r.ok) await invalidateAll();
+		return r.ok;
+	}
+
 	async function apagar(m: MaterialRow) {
 		apagandoId = m.id;
 		try {
@@ -157,7 +218,7 @@
 <svelte:head><title>Materiais — entendo</title></svelte:head>
 <svelte:window {onkeydown} />
 
-<div class="px-4 py-5 lg:px-7 lg:py-[26px]">
+<div class="pagina-studio">
 	<div class="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3">
 		<div class="min-w-[180px] flex-1">
 			<h1 class="mb-1 font-display text-[22px] font-semibold tracking-[-0.024em] lg:text-[26px]">
@@ -224,19 +285,11 @@
 				>
 			{/each}
 		</div>
-		{#if data.langFilters.length > 0}
-			<span class="hidden h-[22px] w-px bg-line sm:block"></span>
-			<div class="flex flex-wrap gap-1.5">
-				{#each data.langFilters as l (l)}
-					<button
-						type="button"
-						onclick={() => (filtroLang = filtroLang === l ? null : l)}
-						aria-pressed={filtroLang === l}
-						class="{chip} {filtroLang === l ? chipOn : chipOff}">{l}</button
-					>
-				{/each}
-			</div>
-		{/if}
+		<FiltroIdioma
+			tags={data.materials.map((m) => m.idioma)}
+			bind:valor={filtroIdioma}
+			formato="chips"
+		/>
 	</div>
 
 	{#if data.materials.length === 0}
@@ -329,17 +382,30 @@
 </div>
 
 <!-- Painel sobre a lista: cadastrar não tira o professor de onde ele confere.
-     O `<form>` fica montado mesmo fechado (`hidden`) para o `bind:this` do
-     formulário existir antes do primeiro clique em "Novo material". -->
-<div class="fixed inset-0 z-50 flex justify-end" hidden={!painel}>
+     O `<form>` fica montado mesmo FECHADO para o `bind:this` do formulário
+     existir antes do primeiro clique em "Novo material" — por isso a entrada e
+     a saída são por CSS, e não pelas transições do Svelte (que pedem `{#if}`):
+     fechado, ele é `invisible` + `inert` (nem foco nem leitor de tela chegam
+     lá), e a visibilidade só vira no FIM da saída, depois do deslize. Entrar
+     desacelera em 300 ms; sair acelera em 200 (design-system.md "Movimento"). -->
+<div
+	class="fixed inset-0 z-50 flex justify-end transition-[visibility] {painel
+		? 'visible duration-300'
+		: 'invisible duration-200'}"
+	inert={!painel}
+>
 	<button
 		type="button"
 		onclick={fechar}
-		class="absolute inset-0 bg-base-content/40"
+		class="absolute inset-0 bg-overlay transition-opacity {painel
+			? 'opacity-100 duration-300 ease-(--ease-out-soft)'
+			: 'opacity-0 duration-200 ease-in'}"
 		aria-label="Fechar"
 	></button>
 	<aside
-		class="relative flex h-full w-full max-w-[520px] animate-[en-slide-in_300ms_var(--ease-out-soft)_both] flex-col border-s border-line bg-base-100 shadow-[-24px_0_60px_-30px_rgba(0,0,0,0.35)]"
+		class="relative flex h-full w-full max-w-[520px] flex-col border-s border-line bg-base-100 shadow-[-24px_0_60px_-30px_rgba(0,0,0,0.35)] transition-transform {painel
+			? 'translate-x-0 duration-300 ease-(--ease-out-soft)'
+			: 'translate-x-full duration-200 ease-in'}"
 		aria-label={editando ? 'Editar material' : 'Novo material'}
 	>
 		<form {...enviar} class="contents">
@@ -350,9 +416,14 @@
 				bind:editando
 				contexto="biblioteca"
 				conjunto={data.materials}
-				{resultado}
+				resultado={modo === 'ia' ? resultadoIa : resultado}
 				{salvando}
 				onfechar={fechar}
+				ia={data.ia}
+				ongerarIa={gerarIa}
+				onaceitarIa={aceitarIa}
+				bind:idioma
+				idiomaPadrao={data.idiomaPadrao}
 			/>
 		</form>
 	</aside>

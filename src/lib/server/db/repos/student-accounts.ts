@@ -69,6 +69,7 @@ export function contaAluno(conta: ContaAluno) {
 											id: true,
 											title: true,
 											targetLang: true,
+											level: true,
 											teacher: { select: { name: true } }
 										}
 									}

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { caminhoInterno } from '$lib/caminho-interno';
 	import { goto } from '$app/navigation';
 	import Loading from '$lib/components/Loading.svelte';
 	import { page } from '$app/state';
@@ -29,10 +30,9 @@
 	// redirect aberto: o parâmetro vem da query string, então qualquer um pode
 	// forjar um link de "entrar" apontando pra fora daqui). `redirectTo` vem do
 	// guard do Studio em hooks.server.ts; `voltar` vem do Player.
-	function caminhoInterno(valor: string | null): string | null {
-		return valor && /^\/(?!\/)/.test(valor) ? valor : null;
-	}
 	const redirectTo = $derived(caminhoInterno(page.url.searchParams.get('redirectTo')));
+	/** Chegou aqui depois de criar uma senha nova em "esqueci a senha". */
+	const senhaNova = $derived(page.url.searchParams.get('senha') === 'nova');
 	const voltar = $derived(caminhoInterno(page.url.searchParams.get('voltar')));
 
 	/** A query que o link de "criar conta" carrega: o mesmo modo e o mesmo retorno. */
@@ -40,7 +40,10 @@
 		'?' +
 			new URLSearchParams({
 				...(como === 'aluno' ? { como: 'aluno' } : {}),
-				...(voltar ? { voltar } : {})
+				...(voltar ? { voltar } : {}),
+				// Quem chegou aqui por um link protegido (o convite de escola, por
+				// exemplo) e ainda não tem conta volta para ele depois do cadastro.
+				...(redirectTo ? { redirectTo } : {})
 			}).toString()
 	);
 
@@ -66,7 +69,7 @@
 				// eslint-disable-next-line svelte/no-navigation-without-resolve -- caminho validado acima contra redirect aberto; não é uma rota literal pra resolve() conferir.
 				await goto(redirectTo);
 			} else {
-				await goto(resolve('/(studio)/atividades'));
+				await goto(resolve('/(studio)/inicio'));
 			}
 			return;
 		}
@@ -134,6 +137,15 @@
 		</p>
 	{/if}
 
+	{#if senhaNova && !error}
+		<p
+			class="mb-4 rounded-field border-s-[3px] border-primary bg-base-200 px-4 py-3 text-[13px] leading-snug"
+			role="status"
+		>
+			Senha nova salva. Entre com ela.
+		</p>
+	{/if}
+
 	{#if error}
 		<div
 			class="mb-4 flex gap-2.5 rounded-field border-s-[3px] border-error bg-base-200 px-4 py-3"
@@ -173,11 +185,14 @@
 		<label class="block">
 			<span class="mb-1.5 flex justify-between text-[13px] font-semibold">
 				Senha
-				{#if como === 'professor'}
-					<!-- A recuperação de senha é do professor: a conta do aluno ainda não
-					     tem provedor de e-mail verificado por trás. -->
-					<a href={resolve('/(auth)/esqueci-senha')} class="font-semibold">Esqueci a senha</a>
-				{/if}
+				<!-- As duas contas recuperam a senha por e-mail; o modo vai junto para a
+				     tela de recuperar já nascer na conta certa. -->
+				<!-- eslint-disable svelte/no-navigation-without-resolve -- rota resolvida mais o modo (?como=aluno); a regra não enxerga a concatenação. -->
+				<a
+					href={resolve('/(auth)/esqueci-senha') + (como === 'aluno' ? '?como=aluno' : '')}
+					class="font-semibold">Esqueci a senha</a
+				>
+				<!-- eslint-enable svelte/no-navigation-without-resolve -->
 			</span>
 			<input
 				name="password"

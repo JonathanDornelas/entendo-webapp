@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { runGenerators } from '$lib/kernel/generators';
 import { getInteraction } from '$lib/kernel/interactions/registry';
 import { getProfile } from '$lib/kernel/language/profiles';
@@ -25,6 +25,14 @@ async function ler(tag: 'ja-JP' | 'zh-CN', antes: string, alvo: string, depois =
 	if (!transcrever || entrada.modo !== 'grade' || !entrada.transcricao) throw new Error('sem');
 	return transcrever({ antes, alvo, depois }, entrada.transcricao);
 }
+
+// O dicionário do kuromoji (18 MB) carrega na primeira chamada. Com a suíte
+// inteira rodando em paralelo, essa carga passava dos 5 s do primeiro caso e o
+// teste falhava por TEMPO, não por leitura errada — aquece aqui, com folga.
+beforeAll(async () => {
+	await transcritorPara(ja);
+	await transcritorPara(zh);
+}, 30_000);
 
 describe('kana', () => {
 	it.each([

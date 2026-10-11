@@ -25,7 +25,8 @@ não apenas múltipla escolha. A referência de experiência é o Duolingo, não
 | Banco     | PostgreSQL 16 — **fixo, decisão de infra**       |
 | Schemas   | Zod                                              |
 | Auth      | Better Auth (adapter Prisma)                     |
-| Cobrança  | Stripe via plugin do Better Auth                 |
+| Cobrança  | `BillingProvider` próprio; manual hoje (ADR-002) |
+| IA        | Gemini (`@google/genai`), atrás de interface     |
 | Fila      | Tabela Postgres + `FOR UPDATE SKIP LOCKED`       |
 | Mídia     | Object storage S3-compatível (preferir R2)       |
 | Testes    | Vitest + Playwright                              |
@@ -81,6 +82,7 @@ pnpm test:e2e       # playwright
 pnpm worker         # worker da fila (rodar junto do dev)
 pnpm db:migrate     # prisma migrate dev
 pnpm db:studio
+pnpm db:seed:demo <email>   # cenário de demonstração numa conta (docs/operacao.md)
 ```
 
 ## Onde está o resto
@@ -157,19 +159,24 @@ Decisões e histórico ficam em `docs/`. Não replique aqui.
   "não estar enviando" — e continua sendo o caminho de desenvolvimento, sem container nenhum.
   **Falta verificar um domínio no Resend** (o grátis inclui até 3): sem isso ele só entrega
   para o e-mail da própria conta, e o remetente é o compartilhado `onboarding@resend.dev`.
-- Cobrança: Stripe primeiro, atrás de interface própria, porque recorrência com cartão no
-  Brasil tem taxa de recusa alta. Ver `docs/adr-002-billing.md` (ainda não escrito).
-- **Os preços da tela de planos são PLACEHOLDER.** `(site)/planos` existe e é o destino de quem
-  bate num bloqueio (`?motivo=`), e a mesma tabela aparece na home — mas nome de plano, valor,
-  ciclo e o que cada um libera NÃO foram decididos. Tudo mockado num arquivo só,
-  `src/lib/content/planos.ts`, com o aviso no cabeçalho. `can()` não lê aquele arquivo: trocar um
-  valor lá muda o que a tela MOSTRA, nunca o que a conta PODE fazer.
+- **Planos: Básico, Pro, Super e Scholar**, com limites de ESTOQUE (atividades e materiais) e
+  créditos de IA por ciclo mensal — os números em `src/lib/billing/catalogo.ts`, a decisão em
+  `can()` (billing.md, `docs/adr-002-billing.md`). **Sem gateway de pagamento por enquanto**:
+  "Assinar" vira um pedido que a equipe atende no painel interno (`/admin`). Falta escolher o
+  gateway (Stripe ou um local com Pix) e ligar o webhook dormente de `routes/api/stripe` a
+  `assinaturas.ts`.
+- **Os PREÇOS da tela de planos são PLACEHOLDER** (`src/lib/content/planos.ts`). Os limites não:
+  eles saem do catálogo, e `catalogo.test.ts` garante que a vitrine não promete outra coisa.
 - **O avatar da conta são dezoito números, não uma imagem** (`src/lib/avatar/`) — coluna de texto
   em `Teacher` e `StudentAccount`, sem bucket e sem prazo de validade. Vale para professor e
   aluno, e é a única coisa da conta do aluno que ele escolhe por gosto (a regra de "nome, e-mail
-  e senha, nada além disso" foi revisitada para isso — ver a nota em `auth/aluno.ts`).
-- **Trial**: cadastro novo entra como `trialing` e já publica — decisão provisória para
-  destravar o produto sem Stripe. Duração e exigência de cartão em aberto (billing.md).
+  e senha, nada além disso" foi revisitada para isso — ver a nota em `auth/aluno.ts`). **Ninguém
+  aparece como iniciais**: toda conta nasce com um avatar sorteado (hook de cadastro das duas
+  instâncias), e quem não tem um gravado — conta antiga, aluno da chamada sem conta — é desenhado
+  pelo `avatarPadrao` do nome, o mesmo rosto em toda tela.
+- **Trial**: cadastro novo entra em trial de 14 dias com os limites do básico, sem cartão
+  (`TRIAL` no catálogo); acabou, pausa criar e publicar — links seguem no ar. Rever quando o
+  gateway existir.
 - **Teclado virtual** em toda questão de escrever no idioma alvo, e só nela: grade para japonês
   (kana), mandarim (pinyin com tom), árabe e híndi, encaixada acima do rodapé do Player; barra de
   acentos para pt/es/fr/it; nada para inglês (`LanguageProfile.input`, kernel.md "Entrada"). O
@@ -184,24 +191,25 @@ Decisões e histórico ficam em `docs/`. Não replique aqui.
   ligar.
 - Geradores: os 7 de `SentencePair` mais um por tipo de conteúdo. Faltam 8 da tabela de
   kernel.md.
-- **"Gerar com IA" no formulário de material é só front**: fonte (prompt / imagem / vídeo),
-  quantidade e a lista de propostas estão desenhadas em `MaterialForm.svelte`, e o botão de
-  gerar fica travado até existir um provedor de LLM (nenhum escolhido) atrás de interface
-  própria em `$lib/server`. Imagem e vídeo pedem ainda leitura de arquivo, que não existe.
+- **"Gerar com IA" é o Gemini** (`LLM_PROVIDER=gemini`, `docs/adr-003-ia-gemini.md`): a IA propõe
+  material a partir de um pedido, o professor marca e confirma, e cada proposta custa um crédito
+  (estornado se não servir). Só o modo "prompt" existe — imagem e vídeo pedem leitura de arquivo.
+  **A chave precisa ser de projeto com faturamento**: a política de privacidade promete que os
+  dados não treinam modelos, o que não vale na camada gratuita.
+- **Módulos e nível** (`docs/adr-004-modulos-e-nivel.md`): módulo é coleção ordenada N:N de
+  atividades; nível é rótulo CEFR, não muda os exercícios. Só **turma alocada** recebe envio do
+  módulo, cada uma com a sua **programação** (tudo agora, por semana, por intervalo, datas), que
+  dispara por job `envio-programado` com `runAfter` — sem cron. A programação escolhe também COMO
+  chega: por e-mail ou **só disponibilizar** (abre no mapa, sem e-mail). O aluno com conta vê o módulo
+  como um **mapa de fases** em 8 bits (`/aluno/modulos/[id]`). Falta decidir o que o aluno que
+  entra na turma depois recebe do que já saiu.
+- **Escola (Scholar)** (`docs/adr-005-escola.md`): organização com coordenação e professores; o
+  contrato vence o plano próprio; a coordenação vê **só números**, nunca nome de aluno nem resposta.
+  Falta: material compartilhado entre professores e o faturamento da escola (hoje por fora).
 - Não existe mais fila de correção: comentar e dar nota de rubrica acontecem na tela da
   tentativa, em cima da resposta (paginas.md "Resultados").
-- `conta` mostra dado real (nome, e-mail, estado da assinatura, o que `can()` libera), mas as
-  AÇÕES dela — salvar, trocar senha, encerrar, checkout e portal — continuam em mock até o
-  Stripe existir. `assinatura` virou uma aba dela (`conta?aba=assinatura`) e a rota só
-  redireciona — ver paginas.md "O que falta".
-
-## Todo:
-- Sistema de dificuldade
-- Documentação!
-- Modulos para alocar atividades (ex: intermediario, frutas, etc..)
-- Ambiente escolar!!, limites personalizados
-
-basico - tudo menos IA, 10 atividades e 60 materiais
-pro - 300 créditos, 30 atividades e 300 materiais
-super - 1000 créditos, 80 e 1000
-scholar - (ambiente diferente)
+- `conta` é real: salva o nome, pede plano, cancela no fim do período, sai da escola e mostra o
+  histórico da assinatura. Trocar senha é real (`changePassword`, com a senha atual) e "esqueci a
+  senha" manda o link por e-mail, pela fila, para professor E aluno (auth.md "Senha"). Continua em
+  mock só **encerrar a conta** (que ainda não decidiu o destino dos links publicados). `assinatura` é uma aba (`conta?aba=assinatura`).
+- Operação, variáveis e a rotina da equipe sem gateway: `docs/operacao.md`.

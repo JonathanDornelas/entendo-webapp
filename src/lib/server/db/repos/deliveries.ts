@@ -51,10 +51,31 @@ export function envios(teacher: TeacherScope) {
 		 * Cria o envio e os convites. Devolve os convites com o aluno junto,
 		 * porque quem chama precisa deles para enfileirar o e-mail.
 		 */
-		async create(publicationId: string, classroomId: string) {
+		async create(
+			publicationId: string,
+			classroomId: string,
+			/**
+			 * Envio de MÓDULO: o mesmo `envioId` agrupa as atividades de um clique só.
+			 * `porEmail: false` é o "só disponibilizar": ninguém é avisado, e por isso o
+			 * convite vai para TODOS os alunos — é ele que abre a fase no mapa de quem
+			 * tem conta, e aqui o e-mail não é o canal.
+			 */
+			modulo?: { envioId: string; moduleId: string; porEmail?: boolean }
+		) {
+			const porEmail = modulo?.porEmail ?? true;
+			// A publicação também tem de ser DESTE professor — conferir só a turma
+			// deixaria um POST direto mandar o link da atividade de outra pessoa
+			// para a própria turma (auth.md "Isolamento entre professores").
+			const publicacao = await prisma.publication.findFirst({
+				where: { id: publicationId, activityVersion: { activity: { teacherId: teacher.id } } },
+				select: { id: true }
+			});
+			if (!publicacao) return null;
 			const turma = await prisma.classroom.findFirst({
 				where: { id: classroomId, teacherId: teacher.id },
-				include: { students: { where: { email: { not: null } }, select: { id: true } } }
+				include: {
+					students: { where: porEmail ? { email: { not: null } } : {}, select: { id: true } }
+				}
 			});
 			if (!turma) return null;
 			if (turma.students.length === 0) return { delivery: null, invites: [] };
@@ -63,6 +84,9 @@ export function envios(teacher: TeacherScope) {
 				data: {
 					publicationId,
 					classroomId,
+					envioId: modulo?.envioId ?? null,
+					moduleId: modulo?.moduleId ?? null,
+					porEmail,
 					invites: {
 						create: turma.students.map((aluno) => ({
 							studentId: aluno.id,
@@ -73,6 +97,27 @@ export function envios(teacher: TeacherScope) {
 				include: { invites: { include: { student: true } } }
 			});
 			return { delivery, invites: delivery.invites };
+		},
+
+		/**
+		 * A atividade por trás de um envio (ou de um convite) está arquivada?
+		 * Reenviar convite de atividade arquivada seria mandar a turma para um
+		 * link fechado — e renovar o token antes de saber disso invalidaria o
+		 * convite antigo à toa. Nulo quando não existe ou não é deste professor.
+		 */
+		async arquivado(ref: { deliveryId: string } | { inviteId: string }): Promise<boolean | null> {
+			const delivery = await prisma.delivery.findFirst({
+				where:
+					'deliveryId' in ref
+						? { id: ref.deliveryId, classroom: { teacherId: teacher.id } }
+						: { invites: { some: { id: ref.inviteId } }, classroom: { teacherId: teacher.id } },
+				select: {
+					publication: {
+						select: { activityVersion: { select: { activity: { select: { archivedAt: true } } } } }
+					}
+				}
+			});
+			return delivery ? delivery.publication.activityVersion.activity.archivedAt !== null : null;
 		},
 
 		/**
@@ -157,7 +202,18 @@ export const convitePorToken = {
 			where: { token },
 			include: {
 				student: { select: { id: true, name: true } },
-				delivery: { include: { publication: { select: { id: true, slug: true } } } }
+				delivery: {
+					include: {
+						publication: {
+							select: {
+								id: true,
+								slug: true,
+								// Arquivada não marca abertura nem identifica ninguém — ver e/[token].
+								activityVersion: { select: { activity: { select: { archivedAt: true } } } }
+							}
+						}
+					}
+				}
 			}
 		});
 	},

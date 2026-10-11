@@ -4,6 +4,9 @@
 	// ranking e gráfico são matéria de Resultados (paginas.md "Turmas e alunos").
 	import { resolve } from '$app/paths';
 	import { withMock } from '$lib/dev/with-mock';
+	import IdiomaTag from '$lib/components/IdiomaTag.svelte';
+	import FiltroIdioma from '$lib/components/FiltroIdioma.svelte';
+	import { casaComFiltro } from '$lib/idiomas';
 	import AmbientShapes from '$lib/components/AmbientShapes.svelte';
 
 	interface Classroom {
@@ -12,6 +15,7 @@
 		badge: string;
 		color: string;
 		languageLabel: string | null;
+		idioma: string | null;
 		students: number;
 		withEmail: number;
 		deliveries: number;
@@ -30,6 +34,7 @@
 				badge: '7B',
 				color: 'violeta',
 				languageLabel: 'Inglês',
+				idioma: 'en-US',
 				students: 24,
 				withEmail: 22,
 				deliveries: 6,
@@ -41,6 +46,7 @@
 				badge: 'EI',
 				color: 'teal',
 				languageLabel: 'Espanhol',
+				idioma: 'es-ES',
 				students: 12,
 				withEmail: 9,
 				deliveries: 2,
@@ -52,6 +58,10 @@
 
 	let { data: dataProp }: { data?: Partial<PageData> } = $props();
 	const data = $derived(withMock(dataProp, MOCK));
+
+	// Filtro só de tela: as turmas são do professor e já vieram no loader.
+	let filtroIdioma = $state('');
+	const visiveis = $derived(data.classrooms.filter((t) => casaComFiltro(t.idioma, filtroIdioma)));
 
 	// Violeta, teal, azul, magenta e ardósia. Verde e âmbar ficam fora: são a
 	// semântica de correção e não podem virar etiqueta de turma.
@@ -72,7 +82,7 @@
 	     produto funciona pelo link, QR e código. O hero explica o ganho e, no
 	     mesmo bloco, diz que nada disso é obrigatório — o mesmo desenho da
 	     lista vazia de atividades. -->
-	<div class="relative flex min-h-[70vh] items-center overflow-hidden px-6 py-12 lg:px-14 lg:py-11">
+	<div class="relative flex min-h-[70vh] items-center overflow-hidden px-4 py-12 lg:px-7 lg:py-14">
 		<AmbientShapes height="230px" />
 		<div class="relative z-1 max-w-[52ch] animate-[en-fade-up_620ms_var(--ease-out-soft)_both]">
 			<p class="mb-4 text-xs font-bold tracking-[0.13em] text-primary uppercase">Turmas</p>
@@ -119,7 +129,7 @@
 		</div>
 	</div>
 {:else}
-	<div class="px-gutter py-gutter-sm">
+	<div class="pagina-studio">
 		<div class="mb-[22px] flex flex-wrap items-end gap-4">
 			<div>
 				<h1 class="mb-1 font-display text-[26px] font-semibold tracking-[-0.022em] lg:text-[28px]">
@@ -132,6 +142,7 @@
 				</p>
 			</div>
 			<div class="flex-1"></div>
+			<FiltroIdioma tags={data.classrooms.map((t) => t.idioma)} bind:valor={filtroIdioma} />
 			<a
 				href={resolve('/(studio)/turmas/nova')}
 				class="btn h-[46px] motion-tap gap-2 rounded-[11px] btn-primary px-[19px] text-[15px] font-bold no-underline"
@@ -157,7 +168,7 @@
 				<span>Turma</span><span>Alunos</span><span>Enviadas</span><span>Último envio</span><span
 				></span>
 			</div>
-			{#each data.classrooms as turma (turma.id)}
+			{#each visiveis as turma (turma.id)}
 				<a
 					href={resolve('/(studio)/turmas/[id]', { id: turma.id })}
 					class="grid grid-cols-[2.6fr_1.5fr_1.15fr_1.3fr_76px] items-center gap-[18px] border-b border-line px-5 py-[15px] text-sm text-base-content no-underline transition-colors last:border-0 hover:bg-base-200"
@@ -170,11 +181,7 @@
 						>
 						<span class="min-w-0">
 							<span class="mb-[3px] block truncate font-semibold">{turma.name}</span>
-							{#if turma.languageLabel}
-								<span class="block truncate text-xs text-base-content/65"
-									>{turma.languageLabel}</span
-								>
-							{/if}
+							<IdiomaTag tag={turma.idioma} class="mt-1" />
 						</span>
 					</span>
 					<span class="min-w-0">
@@ -197,7 +204,7 @@
 		</div>
 
 		<ul class="mb-[22px] grid list-none gap-2.5 p-0 lg:hidden">
-			{#each data.classrooms as turma (turma.id)}
+			{#each visiveis as turma (turma.id)}
 				<li>
 					<a
 						href={resolve('/(studio)/turmas/[id]', { id: turma.id })}
@@ -213,11 +220,7 @@
 								<span class="block truncate text-[0.92rem] font-semibold text-base-content"
 									>{turma.name}</span
 								>
-								{#if turma.languageLabel}
-									<span class="block truncate text-xs text-base-content/65"
-										>{turma.languageLabel}</span
-									>
-								{/if}
+								<IdiomaTag tag={turma.idioma} class="mt-1" />
 							</span>
 						</div>
 						<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-base-content/65">

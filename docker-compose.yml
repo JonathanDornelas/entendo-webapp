@@ -91,6 +91,12 @@ services:
     # E sem `watch`, que é comportamento de `pnpm worker` em desenvolvimento:
     # aqui o código não muda debaixo do processo.
     command: ['./node_modules/.bin/tsx', 'worker/index.ts']
+    environment:
+      <<: *app-env
+      # O envio PROGRAMADO de módulo sai daqui, sem request para dar a origem:
+      # os links do e-mail usam `ORIGIN`. Sem ela, valeria o `BETTER_AUTH_URL`
+      # do `.env`, que é o endereço do `pnpm dev` no host.
+      ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
     # Não publica porta: ele não atende ninguém, só consome a fila.
     deploy:
       resources:

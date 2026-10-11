@@ -1,8 +1,8 @@
 ---
 paths:
   - 'src/routes/+page.svelte'
-  - 'src/routes/(marketing)/**'
-  - 'src/lib/components/marketing/**'
+  - 'src/routes/(site)/**'
+  - 'src/lib/components/Site*.svelte'
 ---
 
 # Página inicial (marketing)

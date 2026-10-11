@@ -81,6 +81,7 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			id: aluno.id,
 			name: aluno.name,
 			initials: iniciais(aluno.name),
+			avatar: aluno.account?.avatar ?? null,
 			email: aluno.email,
 			createdAt: aluno.createdAt.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' }),
 			// O último convite dele: para reenviar só para ele, e para dizer aqui

@@ -625,6 +625,23 @@ para simular a tela de um celular. Essa separação é o que torna a casca embut
 
 ---
 
+## Abrir e fechar — `$lib/client/transicoes.ts` + o véu `overlay`
+
+Modal, painel lateral e gaveta ENTRAM e SAEM — aparecer de uma vez parecia a tela piscando, e sumir
+de uma vez, um travamento. Três transições, as mesmas em toda tela: `veu` (só opacidade),
+`painelLateral` (`lado: 'fim'` para o painel da direita, `'inicio'` para a gaveta) e `modal` (sobe
+18px enquanto aparece). Entrar desacelera (300 ms), sair acelera e some mais rápido (200 ms) — use
+`in:` e `out:` separados, é a direção que escolhe a curva. Dentro de um componente que o PAI monta
+com `{#if}` (o `ProgramacaoPainel`), `|global`: no Svelte 5 a transição é local por padrão e a saída
+não rodaria. `prefers-reduced-motion` zera a duração ali dentro — o Svelte anima pela Web
+Animations API, que a regra global do `app.css` não alcança.
+
+O painel que fica MONTADO fechado (a biblioteca, por causa do `bind:this` do formulário) faz o mesmo
+por CSS: `invisible` + `inert` quando fechado, e a visibilidade só vira no fim da saída.
+
+**O véu é `bg-overlay`, preto translúcido nos dois temas.** Era `bg-base-content/40`, que no escuro
+é um véu BRANCO — a página clareava em vez de recuar. O `::backdrop` do `<dialog>` usa o mesmo token.
+
 ## Formas de ambiente — `AmbientShapes.svelte`
 
 Cinco formas fixas (círculo, quadrado arredondado tipo anel, triângulo, anel tracejado, cápsula)
@@ -746,6 +763,37 @@ itens). `delay` (ms) escalona a animação de entrada quando várias barras apar
 
 ---
 
+## Próximos 7 dias — `SemanaDeEnvios.svelte`
+
+Props: `{ dias: DiaDaSemana[]; rotulo?: string }` — `dias` sai de `proximosDias` (`$lib/modulos/agenda.ts`).
+A mesma faixa na lista de módulos (de todos e de cada um) e no módulo aberto. Um cartão por TURMA por
+dia, porque é um e-mail por aluno por data ("Frutas 3 +1"); cada um abre a programação daquela turma
+(`?turma=`). O dia com envio é largo e o vazio estreito (`grid-cols-(--cols-lg)`, montado dos dias),
+para a semana caber numa linha sem espremer o que importa; no celular a faixa rola de lado e o dia
+vazio continua ali — "nada" é informação. Rascunho é contorno tracejado MAIS o aviso escrito, nunca só
+a cor.
+
+## Etiqueta de cor — o seletor
+
+Turma e módulo escolhem a cor pela ETIQUETA já com a sigla (`CLASSE_DA_ETIQUETA`, quadrado de 46px com
+o de 32px dentro), não por uma bolinha de cor: o professor vê como ela vai aparecer na lista. O nome da
+cor vai no `aria-label` e no `title` (`NOME_DA_COR`, `$lib/etiquetas.ts`) — cor sozinha não se anuncia.
+É o mesmo desenho em "Novo módulo", "Editar módulo", "Editar turma" e "Nova turma".
+
+## Tag de idioma — `IdiomaTag.svelte` + `FiltroIdioma.svelte`
+
+O idioma que o aluno aprende, em atividade, turma e material (`$lib/idiomas.ts`, paginas.md "Tags de
+idioma"). `IdiomaTag` — props `{ tag: string | null | undefined; compacta?: boolean; class?: string }`:
+o código do idioma (`EN`, `JA`) num quadradinho em mono — é o subtag BCP-47 — e o nome em português
+ao lado. **Sem cor própria**: idioma é metadado, não estado (verde/âmbar/vermelho são da correção) nem
+identidade (essa é a etiqueta da turma). Sem tag, contorno tracejado e "sem idioma". `compacta` mostra
+só o código, com o nome no `title` e no `sr-only` — para linha densa.
+
+`FiltroIdioma` — props `{ tags; valor?: $bindable; formato?: 'select' | 'chips'; id?; onmudou?(valor) }`.
+Senta ao lado dos filtros que a tela já tem, no MESMO formato deles. Oferece só os idiomas presentes
+em `tags` (mais "sem idioma") e some quando há um só. O valor é `''` (todos), uma tag ou
+`SEM_IDIOMA`; quem filtra é `casaComFiltro`.
+
 ## Avatar — `Avatar.svelte` + `AvatarEditor.svelte`
 
 O avatar da conta (professor e aluno). Pixel art de 16×16 gerada de um código de **dezoito
@@ -759,17 +807,30 @@ de alguém não pode mudar de pele quando o tema escuro entra), `montar.ts` (a c
 fronteira de validação).
 
 `Avatar.svelte` — props `{ codigo?: string | null; nome?: string; size?: number; radius?: string; class?: string }`.
-**Sem código cai nas INICIAIS**, e isso não é estado de erro: é o que toda conta tem antes de
-alguém abrir o editor. Um quadrado vazio ali pareceria avatar que não carregou. Ele é
+**Sempre um rosto, nunca iniciais.** Sem código gravado — a conta antiga que nunca abriu o editor, o
+aluno da chamada sem conta — o desenho é o `avatarPadrao(nome)`: um sorteio com o NOME como semente
+(passado por NFC), o mesmo rosto para a mesma pessoa em toda tela e todo aparelho, sem gravar nada.
+Conta nova já nasce com um sorteado (hook de cadastro das duas instâncias de auth), e salvar o
+perfil de quem não tem grava o rosto de agora antes de o nome mudar. Ele é
 `aria-hidden`: o nome está sempre ao lado, e anunciar "imagem" só somaria ruído.
 `shape-rendering="crispEdges"` é o que faz pixel art continuar pixel art — sem ele o browser
 suaviza a escala e cada quadrado ganha uma borda cinza.
 
+**É o ícone da pessoa em TODO lugar onde ela aparece** — nunca um círculo de iniciais à mão. Do
+professor: barra lateral, cabeçalho do celular, gaveta, coordenação da escola. Do aluno: chamada da
+turma, ficha do aluno, tentativas (lista e detalhe), cabeçalho da questão no Player, área do aluno e
+o mapa do módulo. O avatar do aluno vem da CONTA dele (`StudentAccount.avatar`, da conta logada na
+tentativa ou da ligada à ficha); aluno sem conta ganha o `avatarPadrao` do nome.
+
 `AvatarEditor.svelte` — props `{ codigo: $bindable; aberto?: $bindable; onusar?; oncancelar? }`.
 **É um `<dialog>` de verdade, não uma `div` com fundo escuro**: foco preso, Escape e backdrop vêm
 do elemento, e "sem framework de UI" é razão para usar a plataforma, não para reimplementar o que
-ela já faz à mão (e pela metade). Cancelar — inclusive por Escape ou clique no backdrop — devolve o
-avatar como estava ao abrir, senão "fechar sem querer" gravava a mudança.
+ela já faz à mão (e pela metade). Cancelar — inclusive por Escape ou clique no véu — devolve o
+avatar como estava ao abrir, senão "fechar sem querer" gravava a mudança. **Fechar anima antes de
+fechar** (`en-modal-out` e `en-veu-out`, 180 ms): o `close()` nativo sumia com diálogo e véu no
+mesmo quadro, então o Escape tem o fechar imediato impedido e o `close()` vem no `animationend`
+(com um `setTimeout` de rede). O clique no véu cai no próprio `<dialog>` — o `<dialog>` modal não
+fecha sozinho por ele. Abre a partir do rosto que a pessoa já vê (o gravado ou o `avatarPadrao`).
 
 **Cada miniatura mostra a escolha no avatar de AGORA**, não num manequim: é a única forma de saber
 se aquele cabelo combina com aquela pele. São ~20 avatares por categoria, e é por isso que o

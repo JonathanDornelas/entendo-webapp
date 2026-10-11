@@ -1,66 +1,87 @@
 ---
 paths:
   - 'src/lib/server/billing/**'
+  - 'src/lib/billing/**'
   - 'src/routes/api/stripe/**'
-  - 'src/routes/(studio)/assinatura/**'
+  - 'src/routes/(studio)/conta/**'
+  - 'src/routes/(site)/planos/**'
+  - 'src/routes/(admin)/**'
 ---
 
-# Assinatura
+# Planos, limites e assinatura
 
-Plugin de Stripe do Better Auth: criação de cliente no cadastro, planos, troca de plano, trial,
-cancelamento e portal de cobrança.
+Decisões e histórico: `docs/adr-002-billing.md` (planos e cobrança) e `docs/adr-003-ia-gemini.md`
+(créditos). Aqui, as regras que o código segue.
 
-Mas a cobrança fica **atrás de uma interface própria** (`BillingProvider`), porque recorrência
-com cartão de crédito no Brasil tem taxa de recusa alta e pode ser necessário trocar por um
-gateway local com Pix. Nenhum código de produto importa o SDK do Stripe direto.
+## Os planos
 
-## As três disciplinas que decidem se a cobrança é confiável
+| Plano     | Atividades                                    | Materiais | Créditos de IA / mês |
+| --------- | --------------------------------------------- | --------- | -------------------- |
+| `basico`  | 10                                            | 60        | — (sem IA)           |
+| `pro`     | 30                                            | 300       | 300                  |
+| `super`   | 80                                            | 1000      | 1000                 |
+| `scholar` | contrato da escola (`docs/adr-005-escola.md`) |
 
-**1. O webhook é a fonte da verdade, nunca o redirect.**
-O aluno volta do Checkout para a página de sucesso? Isso não libera nada. O acesso só é
-concedido quando o evento chega e é verificado. Redirect e webhook podem chegar fora de ordem.
+Os números moram em **`src/lib/billing/catalogo.ts`** e em nenhum outro lugar. A vitrine
+(`src/lib/content/planos.ts`) escreve os textos a partir dele; `catalogo.test.ts` falha se divergirem.
+Preço continua placeholder em `planos.ts` — trocar um valor ali muda o que a tela MOSTRA, nunca o que
+a conta PODE fazer.
 
-**2. O endpoint do webhook precisa do corpo cru.**
-Verificar a assinatura exige o body exato, antes de qualquer parse. Por isso o webhook é um
-`+server.ts` com `await request.text()` — **não pode ser form action nem remote function.**
+**Os limites são de ESTOQUE** — contam o que existe agora. Atividade arquivada não conta; material
+reaproveitado (`findEquivalent`) não ocupa vaga nova. Créditos renovam por ciclo mensal e não
+acumulam.
 
-**3. Idempotência.**
-O Stripe reenvia eventos. Guarde o `event.id` numa tabela e ignore repetidos, senão você libera
-crédito duas vezes ou deixa o estado inconsistente.
+## Um ponto de decisão
 
-## Entitlements
+Não espalhe `subscriptionStatus === 'active'` pelo código.
 
-Não espalhe `subscription.status === 'active'` pelo código. Derive o estado de acesso na linha
-do professor, atualizado pelo webhook:
+- `entitlements.ts` (puro): `montarEstado`, `can(estado, capacidade)`, `cabe(estado, recurso, n)`,
+  `motivoDoBloqueio`. **A situação sai das DATAS** (`trialEndsAt`, `currentPeriodEnd`,
+  `gracePeriodEnd`) na leitura — nada de cron.
+- `acesso.ts`: `acessoDoProfessor(teacher, db?)` busca linha, uso, créditos e escola e monta o
+  `EstadoDeAcesso`. `resumoDoAcesso` é o DTO da tela, com as decisões já tomadas por `can()`.
+- O `motivoDoBloqueio` usa a lista fechada de `src/lib/billing/motivos.ts`, a mesma que
+  `/planos?motivo=` aceita.
 
-```
-Teacher { plan, subscriptionStatus, currentPeriodEnd, gracePeriodEnd }
-```
+## Cota: contar e criar na mesma trava
 
-E tenha um só ponto de decisão:
+Toda criação que ocupa estoque passa por **`comCota`** (`cota.ts`): transação com
+`SELECT … FOR NO KEY UPDATE` na linha do professor, leitura do estado com o `tx`, e a escrita com o
+`tx`. Por isso os repositórios aceitam `db: Db` — usar o `prisma` global dentro dela é escrever por
+outra conexão e travar no próprio lock. Nada de chamada de rede dentro da trava.
 
-```ts
-can(teacher, 'publicar_atividade');
-can(teacher, 'usar_asr');
-```
+Material entra sempre por **`gravarMateriais`** (`src/lib/server/atividades/gravar-materiais.ts`):
+reaproveita o igual, aceita o lote até onde cabe e devolve `foraDoLimite`.
 
-Quando a regra de negócio mudar — e vai mudar — você muda num lugar.
+## Um escritor da cobrança
 
-**Trial provisório**: professor recém-cadastrado nasce `subscriptionStatus: 'trialing'`
-(`defaultValue` no Better Auth), e `can()` trata `trialing` como pagante. Sem isso ninguém
-publica, porque o Stripe ainda não está plugado. **Duração do trial e exigência de cartão
-continuam em aberto** — quando o checkout existir, quem escreve esse campo é o webhook, e esta
-decisão precisa ser revisitada junto com o ADR de cobrança.
+**`assinaturas.ts`** é o único lugar que escreve `plan`, `subscriptionStatus`, `currentPeriodEnd` &
+cia. Cada operação grava um `AuditEvent` na mesma transação, com o ator. Painel e (futuro) webhook
+chamam as mesmas funções.
 
-`can()` recebe só `{ subscriptionStatus, gracePeriodEnd }`, não a linha inteira do Prisma —
-assim serve tanto para o banco quanto para o usuário da sessão do Better Auth, que traz os
-mesmos campos com opcionalidade diferente.
+No Better Auth esses campos são **`input: false`** (e `stripeCustomerId`, `returned: false`). Campo de
+cobrança novo nasce assim — sem isso o corpo do cadastro escolhe o plano. Teste: `auth/campos.test.ts`.
+
+## Sem gateway (por enquanto)
+
+`BillingProvider` devolve resultado discriminado (`redirecionar` | `pedido`). O provedor em uso é o
+**manual**: "assinar" vira `PlanRequest` + aviso à equipe, e o plano é ativado em `/admin/pedidos`.
+
+Quando um gateway entrar, as três disciplinas continuam valendo:
+
+1. **O webhook é a fonte da verdade, nunca o redirect.**
+2. **O endpoint precisa do corpo cru** — `+server.ts` com `await request.text()`, não form action
+   nem remote function.
+3. **Idempotência** pelo `event.id` (`StripeEvent`): insira o evento e processe na mesma transação.
+
+## Trial
+
+Cadastro novo: `trialing` com `trialEndsAt = agora + TRIAL.dias`, carimbado em
+`databaseHooks.user.create.before`. Nunca `defaultValue` em campo `input: false` (é copiado sem ser
+chamado quando o corpo traz a chave). Trial usa os limites do básico.
 
 ## Degradação, não desligamento
 
-Assinatura vencida **não apaga nada e não derruba link publicado**. Aluno no meio de uma
-tentativa não pode ser afetado pela cobrança do professor.
-
-O comportamento é: o professor perde a capacidade de criar e publicar, mas as atividades já
-publicadas continuam respondendo até o fim do período de carência. Isso evita o pior cenário
-possível do produto, que é o professor descobrir na frente da turma que o link morreu.
+Plano vencido **não apaga nada e não derruba link publicado** — nunca, não só "até a carência".
+O que pausa é criar e publicar. O Player não consulta `entitlements.ts`. Aluno no meio de uma
+tentativa nunca é afetado pela cobrança do professor.

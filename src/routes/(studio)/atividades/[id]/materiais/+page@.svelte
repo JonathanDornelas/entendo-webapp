@@ -7,6 +7,9 @@
 	// painel sobre a lista, aqui é coluna fixa à esquerda. No celular ele cobre a
 	// lista e "Ver os N materiais" alterna entre os dois.
 	import { resolve } from '$app/paths';
+	import IdiomaTag from '$lib/components/IdiomaTag.svelte';
+	import FiltroIdioma from '$lib/components/FiltroIdioma.svelte';
+	import { casaComFiltro } from '$lib/idiomas';
 	import Loading from '$lib/components/Loading.svelte';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
@@ -22,6 +25,10 @@
 		type MaterialRow
 	} from '$lib/components/material-form';
 	import { withMock } from '$lib/dev/with-mock';
+	import { aceitarPropostasIa, gerarPropostasIa } from '../../../materiais/ia.remote';
+	import type { ResultadoMaterial } from '$lib/components/MaterialForm.svelte';
+	import type { EstadoDaIa, RespostaDaGeracao } from '$lib/billing/ia';
+	import type { ContentUnitKind } from '$lib/kernel/content/types';
 	import { estimarRendimento } from '$lib/kernel/content/rendimento';
 	import {
 		adicionarMaterial,
@@ -43,6 +50,7 @@
 			sourceLabel: string;
 		};
 		materials: MaterialRow[];
+		ia: EstadoDaIa;
 	}
 
 	const MOCK: PageData = {
@@ -60,7 +68,7 @@
 				kind: 'pair',
 				primary: 'She has been working here since 2019.',
 				secondary: 'Ela trabalha aqui desde 2019.',
-				language: 'Inglês',
+				idioma: 'en-US',
 				usedIn: 2,
 				daBiblioteca: true,
 				target: 'She has been working here since 2019.',
@@ -76,7 +84,7 @@
 				kind: 'pair',
 				primary: 'I have already finished the report.',
 				secondary: 'Eu já terminei o relatório.',
-				language: 'Inglês',
+				idioma: 'en-US',
 				usedIn: 1,
 				daBiblioteca: false,
 				target: 'I have already finished the report.',
@@ -87,7 +95,15 @@
 				questions: [],
 				lines: []
 			}
-		]
+		],
+		ia: {
+			configurada: false,
+			pode: false,
+			motivo: 'ia',
+			saldo: 0,
+			custoPorProposta: 1,
+			idiomas: null
+		}
 	};
 
 	let { data: dataProp }: { data?: Partial<PageData> } = $props();
@@ -107,6 +123,32 @@
 		editando ? editarMaterial : modo === 'lista' ? adicionarMateriaisEmLote : adicionarMaterial
 	);
 	const resultado = $derived(acao.result);
+
+	// ── gerar com IA ── nos idiomas DESTA atividade (o servidor os lê dela, não do
+	// browser). O `requestId` torna o débito idempotente: clique duplo não paga duas vezes.
+	let resultadoIa = $state<ResultadoMaterial | undefined>(undefined);
+
+	async function gerarIa(pedido: {
+		kind: ContentUnitKind;
+		texto: string;
+		quantos: 5 | 10 | 20;
+	}): Promise<RespostaDaGeracao> {
+		const r = await gerarPropostasIa({
+			requestId: crypto.randomUUID(),
+			kind: pedido.kind,
+			pedido: pedido.texto,
+			quantos: pedido.quantos,
+			activityId: data.activity.id
+		});
+		return r.ok ? { ok: true, propostas: r.propostas, saldo: r.saldo } : r;
+	}
+
+	async function aceitarIa(kind: ContentUnitKind, dados: Record<string, unknown>[]) {
+		const r = await aceitarPropostasIa({ kind, propostas: dados, activityId: data.activity.id });
+		resultadoIa = r;
+		if (r.ok) await invalidateAll();
+		return r.ok;
+	}
 	const enviar = $derived(
 		acao.enhance(async ({ submit }) => {
 			const alvo = acao;
@@ -151,6 +193,12 @@
 	let escolhidos = $state<string[]>([]);
 	let buscaBiblioteca = $state('');
 	let filtroBiblioteca = $state<MaterialKind | 'todos'>('todos');
+	/**
+	 * O filtro de idioma nasce no idioma DA ATIVIDADE: trazer uma frase de
+	 * espanhol para uma atividade de inglês é quase sempre engano — mas não é
+	 * proibido, e o professor tira o filtro se quiser.
+	 */
+	let filtroIdiomaBib = $state('');
 	let trazendo = $state(false);
 	let removendoId = $state<string | null>(null);
 
@@ -160,13 +208,14 @@
 			: [...escolhidos, contentId];
 	}
 
-	function filtrar<T extends { kind: MaterialKind; primary: string; secondary: string }>(
-		lista: T[]
-	) {
+	function filtrar<
+		T extends { kind: MaterialKind; primary: string; secondary: string; idioma: string | null }
+	>(lista: T[]) {
 		const termo = buscaBiblioteca.trim().toLowerCase();
 		return lista.filter(
 			(m) =>
 				(filtroBiblioteca === 'todos' || m.kind === filtroBiblioteca) &&
+				casaComFiltro(m.idioma, filtroIdiomaBib) &&
 				(termo === '' ||
 					m.primary.toLowerCase().includes(termo) ||
 					m.secondary.toLowerCase().includes(termo))
@@ -191,6 +240,9 @@
 		escolhidos = [];
 		buscaBiblioteca = '';
 		filtroBiblioteca = 'todos';
+		filtroIdiomaBib = (disponiveis.current ?? []).some((m) => m.idioma === data.activity.tag)
+			? data.activity.tag
+			: '';
 		formAberto = false;
 	}
 
@@ -270,8 +322,11 @@
 				dir={data.activity.dir}
 				targetLabel={data.activity.targetLabel}
 				sourceLabel={data.activity.sourceLabel}
-				{resultado}
+				resultado={modo === 'ia' ? resultadoIa : resultado}
 				{salvando}
+				ia={data.ia}
+				ongerarIa={gerarIa}
+				onaceitarIa={aceitarIa}
 				onfechar={() => (formAberto = false)}
 				fecharRotulo="Ver os {statusTexto}"
 				fecharSoNoCelular
@@ -376,6 +431,11 @@
 										>
 									{/each}
 								</div>
+								<FiltroIdioma
+									tags={lista.map((m) => m.idioma)}
+									bind:valor={filtroIdiomaBib}
+									formato="chips"
+								/>
 							</div>
 
 							{#if visiveis.length === 0}
@@ -430,12 +490,13 @@
 													<span
 														class="block truncate font-content text-[14px]"
 														dir={data.activity.dir}
-														data-content-lang={data.activity.tag}>{m.primary}</span
+														data-content-lang={m.idioma ?? data.activity.tag}>{m.primary}</span
 													>
 													<span class="block truncate text-[12px] text-base-content/65"
 														>{m.secondary}</span
 													>
 												</span>
+												<IdiomaTag tag={m.idioma} compacta />
 											</button>
 										</li>
 									{/each}

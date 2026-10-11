@@ -6,6 +6,7 @@ import { materiais } from '$lib/server/db/repos/content-units';
 import { parseContentUnit } from '$lib/kernel/content/parse';
 import { getProfile, labelForTag } from '$lib/kernel/language/profiles';
 import { KERNEL_TO_KIND, type MaterialRow } from '$lib/components/material-form';
+import { estadoDaIa } from '$lib/server/ia/estado';
 
 export const load: PageServerLoad = async ({ locals, params }) => {
 	const teacher = requireTeacher(locals);
@@ -45,7 +46,8 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			kind: KERNEL_TO_KIND[unit.kind],
 			primary,
 			secondary,
-			language: idioma,
+			// Dentro da atividade, o material fala o idioma DELA.
+			idioma: activity.targetLang,
 			usedIn: unit.usedIn,
 			// Em mais de uma atividade = veio da biblioteca (ou já foi para ela).
 			// Cadastrar de novo uma frase que o professor já tinha REAPROVEITA a
@@ -80,6 +82,8 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 			targetLabel: idioma,
 			sourceLabel: labelForTag(activity.sourceLang)
 		},
-		materials
+		materials,
+		// "Gerar com IA" escreve no par de idiomas DA ATIVIDADE.
+		ia: await estadoDaIa(teacher, { alvo: activity.targetLang, origem: activity.sourceLang })
 	};
 };

@@ -8,6 +8,7 @@ import { resolve as resolvePath } from '$app/paths';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
 import { auth } from '$lib/server/auth';
 import { authAluno } from '$lib/server/auth/aluno';
+import { ehAdminDaPlataforma } from '$lib/server/auth/guard';
 
 // Rotas que não exigem professor autenticado: capa pública, Player do aluno
 // (a/[slug]), o webhook do Stripe e o catálogo de componentes de dev. Tudo
@@ -69,6 +70,15 @@ export const handle: Handle = async ({ event, resolve }) => {
 	event.locals.user = result?.user ?? null;
 	event.locals.session = result?.session ?? null;
 	event.locals.aluno = sessaoAluno?.user ?? null;
+
+	// O painel interno não existe para quem não o administra: 404 para todo
+	// mundo, inclusive para quem não está logado — e por isso ANTES do
+	// redirecionamento de login, que confirmaria que há algo ali. É defesa em
+	// profundidade: a barreira de verdade é `requirePlatformAdmin` em cada load
+	// e remote function (que nem passam por aqui: `/_app/remote/...`).
+	if (event.url.pathname.startsWith('/admin') && !ehAdminDaPlataforma(event.locals.user?.id)) {
+		return new Response('Not found', { status: 404 });
+	}
 
 	// URL que não casa com rota nenhuma (`route.id === null`) é 404, não área
 	// protegida: sem esta linha, qualquer endereço digitado errado jogava um

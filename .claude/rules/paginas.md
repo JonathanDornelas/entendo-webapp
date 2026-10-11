@@ -20,6 +20,7 @@ específico de rota. Contexto completo de cada página (dados, estados, regras q
 | `+error.svelte`                                                                             | 404 e 500                                               |
 | `(site)/planos`                                                                             | Planos e preços — e o destino de quem bate num bloqueio |
 | `(site)/contato` `sobre` `ajuda` `status` `privacidade` `termos` `cookies` `acessibilidade` | Páginas institucionais                                  |
+| `(studio)/inicio`                                                                           | Início — uma peça por área; é para onde o login leva    |
 | `(studio)/atividades`                                                                       | Lista — **com zero atividades vira o onboarding**       |
 | `(studio)/atividades/[id]`                                                                  | A atividade aberta: questões, link, QR, envios          |
 | `(studio)/atividades/nova` → `[id]/materiais` → `revisar` → `publicar`                      | Wizard de criação                                       |
@@ -29,10 +30,14 @@ específico de rota. Contexto completo de cada página (dados, estados, regras q
 | `(studio)/resultados` → `[activityId]` → `[attemptId]`                                      | Resultados — e a correção, na própria resposta          |
 | `(studio)/turmas` → `nova` → `[id]`                                                         | Turmas e alunos                                         |
 | `(studio)/alunos/[id]`                                                                      | O aluno e o histórico de respostas dele                 |
+| `(studio)/modulos` → `[id]` → `[id]/mapa` · `calendario`                                    | Módulos, turmas e programação de envio · calendário     |
+| `(studio)/escola` · `escola/convite/[token]`                                                | Coordenação da escola (só números) · aceite do convite  |
 | `(studio)/conta` (`?aba=assinatura`; `/assinatura` redireciona)                             | Conta e assinatura, em duas abas                        |
+| `(admin)/admin` → `professores` `pedidos` `escolas`                                         | Painel interno da plataforma (404 para os outros)       |
 | `a/[slug]` `codigo` `q/[n]` `resultado` `revisao`                                           | Player                                                  |
 | `e/[token]`                                                                                 | Link pessoal do convite (redireciona, não é tela)       |
 | `aluno` (`aluno/entrar` só redireciona para `/entrar?como=aluno`)                           | Área do aluno: conta OPCIONAL e histórico dele          |
+| `aluno/modulos/[id]`                                                                        | O mapa do módulo do aluno, no tema 8 bits               |
 
 ## Regras que atravessam várias telas
 
@@ -73,6 +78,11 @@ publicados continuam funcionando. Voltar do checkout não significa pago — a c
 do provedor, e existe um estado "confirmando" para isso.
 
 ## Studio
+
+**Toda tela do painel ocupa a largura INTEIRA** do `<main>`, pelo mesmo invólucro
+(`pagina-studio`, design-system.md "Largura das telas do Studio"): nenhuma página tem `max-w` +
+`mx-auto` próprio. Cada uma tinha a sua medida — 820px na conta, 900 no módulo, 1000 na lista de
+módulos — e trocar de aba fazia o conteúdo pular. O que limita leitura é a medida do parágrafo.
 
 Barra lateral fixa em `(studio)/+layout.svelte`. **O wizard de criação não usa esse layout** —
 durante a criação o professor tem uma tarefa só, e o `Stepper` substitui a navegação. Na
@@ -213,7 +223,7 @@ legenda de teclado sem o leiaute de duas colunas.
 
 Cada tela do Player é um cartão com **cabeçalho e rodapé próprios**: marca e estado em cima,
 frase de contexto e ação principal embaixo — e **a página não rola**, quem rola é a área do
-meio (design-system.md "Dois contextos"). **Quem está logado vê o próprio nome no cabeçalho, e
+meio (design-system.md "Dois contextos"). **Quem está logado vê o próprio avatar e o nome no cabeçalho, e
 ele é a porta do painel do aluno** (`/aluno`) — na entrada, no lugar do cadeado "você não precisa
 de conta", e no resultado. Sem conta é só o nome (ou o cadeado): a área não existe para quem não
 a tem, e o Player não é o lugar de oferecê-la. No cabeçalho mora também o **regulador de volume**
@@ -410,9 +420,10 @@ Rotas **ligadas ao banco** (loader real + remote functions): `(studio)/atividade
 etapas do wizard, o editor de item, e as quatro telas do Player. O fluxo fecha ponta a ponta —
 professor cola frases, gera itens, publica; aluno abre o link, responde e vê o resultado.
 
-Continua **em mock** o que depende de cobrança: as AÇÕES de `(studio)/conta` (salvar dados,
-trocar senha, encerrar, checkout/portal). O que a tela mostra já é real — nome, e-mail, estado da
-assinatura e o que `can()` libera.
+Continua **em mock** em `(studio)/conta` só encerrar a conta. Trocar senha é real (auth.md
+"Senha": abre no próprio cartão, pede a senha atual e desconecta os outros aparelhos). O resto é real — o
+nome salva (action `profile`), e a aba de assinatura pede plano, cancela no fim do período e mostra
+o histórico (docs/adr-002-billing.md). Não há checkout nem portal porque não há gateway.
 
 Cada tela declara em `$props()` a forma de `data` que espera e usa `withMock` como default.
 **Atenção**: `withMock` só aceita o dado real quando ele traz TODAS as chaves do mock — um
@@ -447,7 +458,62 @@ Pendências dentro do que já está ligado:
   isola item por item e `publicarAtividade` recusa publicar qualquer um que não valide, já que
   versão publicada é imutável e não teria conserto.
 
+## Início
+
+`(studio)/inicio` (o desenho "Studio Dashboard", variante 1b — "mapa da conta") é para onde o
+**login** leva e o primeiro item do menu (no celular, a primeira aba; a conta saiu da barra de abas
+porque o avatar do cabeçalho já leva a ela). O **cadastro** continua indo para `atividades`: com
+zero atividades ela é o onboarding, e um início todo zerado não diz a quem acabou de chegar o que
+fazer primeiro.
+
+É uma tela de LEITURA, em grade: uma peça por área, cada uma com o número principal, um detalhe
+visual próprio e uma linha de contexto, e a peça inteira leva à tela da área — as ações moram lá.
+
+- **Topo**: o dia, "Bom dia/Boa tarde/Boa noite" no relógio de Brasília, e as duas criações sem
+  botão na barra lateral — "Novo módulo" (`modulos?novo=1` abre o formulário) e "Criar com IA"
+  (`materiais?novo=ia` abre a biblioteca já no modo da IA). **"Criar com IA" só aparece com
+  provedor configurado E o plano deixando** (`acesso.pode.usarIa`); sem isso o principal é "Nova
+  atividade" — um botão principal que leva a "não disponível no seu plano" é pior que nenhum.
+- **Esta semana** (segunda a domingo): envios na fila até domingo (um por turma por dia, a unidade
+  dos "Próximos 7 dias"), tentativas e acerto da semana, e as tentativas por dia em colunas. Cada
+  coluna leva UMA marca — hoje, o dia mais movimentado, um dia com envio, nessa ordem — e a legenda
+  só explica a marca que está na tela. O gráfico se anuncia por texto (`descricaoDasBarras`). Sem
+  formas de ambiente: o cartão é gráfico e legenda de ponta a ponta.
+- **Tentativas recentes**: as cinco últimas de todas as turmas, com avatar, sigla da turma, acerto
+  (só das respostas corrigidas) e o estado — "para corrigir" em âmbar vence "em andamento" e
+  "terminou". Cada uma abre a tentativa.
+- **As seis peças**: atividades (no ar, as três editadas por último com o estado), módulos (a barra
+  dos grupos — programado, envio que não saiu em vermelho, pausado ou concluído, sem programação — e
+  o próximo envio), turmas (a fileira de rostos, quem tem avatar primeiro, e quem recebe e-mail),
+  resultados (o acerto médio com as três faixas e o menor acerto), materiais (por tipo e quantos
+  ainda cabem no plano) e assinatura (o plano, UMA barra — créditos de IA quando o plano tem, senão
+  atividades — e quando renova ou termina).
+
+**Os números são os das telas de cada área, nunca recalculados**: o acerto médio sai de
+`listaDeResultados` (o mesmo de Resultados), o estado do módulo de `estadoDoModulo` (o mesmo da
+lista de módulos), a agenda de `eventosDaAgenda`. A leitura inteira é `painelDoInicio`
+(`$lib/server/inicio/painel.ts`), com teste de isolamento; a semana e a saudação são puras
+(`$lib/inicio/semana.ts`).
+
+Celular: uma coluna, e os três números da semana em três colunas sem o ícone. Tablet: duas
+colunas, com a semana e as tentativas em largura inteira. A partir de `xl`, a grade de doze do
+desenho (semana 8 + tentativas 4; peças 4·4·4 e 6·3·3).
+
 ## Resultados — e a correção
+
+**A lista é uma TABELA** (o desenho "Studio Resultados v2"): uma linha por atividade publicada, com
+tentativas, acerto médio (barra CURTA com certo/parcial/errado, para comparar linha com linha) e a
+data da última tentativa. No topo, três números: atividades publicadas, tentativas e o acerto médio
+PESADO POR TENTATIVA. Busca, ordem (menor acerto · mais recentes · mais tentativas) e **"Agrupar por
+idioma"** (ligado de padrão, com a tag e os totais de cada idioma no cabeçalho do grupo) são de
+tela. Menos de 3 tentativas avisa "pouco para ler". Atividade sem tentativa não vira número: a linha
+diz "mandar o link" e leva ao detalhe da atividade, onde estão o link e o QR. O "CSV" é montado no
+navegador com o que a tela mostra (`$lib/csv.ts`), sem endpoint.
+
+A página de UMA atividade: números (tentativas, acerto médio, parcial), os itens por dificuldade com
+o rótulo do que o aluno fez (`rotuloDoItem`, o mesmo do Player — nunca "type"), e à direita as
+tentativas recentes com a sequência de questões em barrinhas. **Nenhuma das duas mostra versão** e
+**nenhuma mostra a fila de correção**: o retorno do professor mora na tela da tentativa (abaixo).
 
 **Não existe mais fila de correção.** `(studio)/correcao` foi removida: comentar e dar nota
 acontecem na tela da TENTATIVA, em cima da própria resposta. A fila obrigava o professor a
@@ -484,6 +550,22 @@ uma tentativa antiga apareceria com buracos que não existem.
 o professor revê na aula seguinte. Item ainda sem resposta vai para o fim — 0% ali é ausência,
 não erro.
 
+## Tags de idioma
+
+Atividade, turma e material têm uma **tag de idioma** — o idioma que o aluno aprende, um por item
+(`$lib/idiomas.ts`, que lê `languageLabels`: idioma novo no kernel aparece aqui sem editar nada).
+Atividade sempre tem (`targetLang`); turma e material podem não ter, e aí a tag diz "sem idioma".
+
+- **Um desenho em todo lugar** (`IdiomaTag.svelte`, components.md): lista e detalhe de atividade,
+  lista e cabeçalho da turma, chamada de envio, biblioteca, seletor do wizard, linhas do módulo,
+  busca do cabeçalho e resultados.
+- **Filtros onde a lista mostra idioma** (`FiltroIdioma.svelte`): atividades e turmas (select),
+  biblioteca e os dois seletores de "trazer"/"enviar" (chips). Só oferece os idiomas PRESENTES, e
+  some quando há um só.
+- **Os seletores nascem no idioma certo**: "trazer da biblioteca" no idioma da atividade, "enviar
+  atividade" no idioma da turma — trazer frase de espanhol para atividade de inglês é quase sempre
+  engano, mas não é proibido.
+
 ## Biblioteca de materiais
 
 `(studio)/materiais` lista TUDO que o professor cadastrou, inclusive o que ele colou dentro de
@@ -498,8 +580,11 @@ atividade não podem produzir dados de formas diferentes, senão "trazer da bibl
 dado de outro formato. Um material salvo fecha o painel; o lote fica aberto mostrando quantas
 linhas entraram, porque colar a lista seguinte é o gesto natural. Esc fecha.
 
-**O idioma não é campo do `ContentUnit`**: ele vem das atividades que usam o material. Material
-que ainda não está em nenhuma aparece com "—", não com um idioma inventado.
+**Cada material tem a sua tag de idioma** (`ContentUnit.targetLang`, ver "Tags de idioma" abaixo):
+no wizard é a da atividade; na biblioteca o formulário tem o seletor "Idioma", que nasce no idioma
+que o professor mais usa e vale também para a prévia (tokenizar, direção), para os rótulos ("Frase
+em japonês") e para a IA. Material que já está em atividade tem o idioma TRAVADO, com o motivo
+escrito. Sem tag, "sem idioma" — nunca um idioma inventado.
 
 **Apagar um material não alcança atividade nenhuma.** Ele sai da biblioteca e dos rascunhos; o
 que está no ar continua intacto, porque a versão publicada guarda uma cópia congelada (regra
@@ -593,8 +678,11 @@ o link pessoal existe para resolver. O que foi respondido não muda — muda de 
 aparece. Quando o nome digitado sobrevive diferente do cadastro, a tela do aluno mostra
 "respondeu como …" em vez de esconder: o professor precisa entender de onde a linha veio.
 
-**Os estados de aluno** têm texto próprio e ícone, nunca só cor: Vai receber, Enviado, Começou,
-Terminou, Sem e-mail e Voltou. **"Sem e-mail" é sobre o CADASTRO; "Vai receber" é sobre a turma
+**Os estados de aluno** têm texto próprio e ícone, nunca só cor: Vai receber, Enviado,
+Disponível, Começou, Terminou, Sem e-mail e Voltou. **"Disponível" é o envio de módulo sem e-mail**
+(`Delivery.porEmail` falso): a atividade abriu no mapa e o link pessoal existe, mas ninguém foi
+avisado — "Enviado" ali afirmaria um e-mail que não saiu; o cartão do envio diz "no mapa, sem
+e-mail" no lugar de "não abriram", e o "Reenviar para quem não abriu" some. **"Sem e-mail" é sobre o CADASTRO; "Vai receber" é sobre a turma
 ainda não ter recebido nada** — juntar os dois marcava como "sem e-mail" um aluno que tem e-mail
 e só não foi convidado ainda. Verde e âmbar ficam FORA (são a semântica de correção, e
 "terminou" não é "acertou"); vermelho aparece só em Voltou, o único que pede ação. As etiquetas
@@ -607,9 +695,18 @@ violeta: é o que recebe convite), atividades enviadas e e-mails que voltaram. D
 dois blocos NA MESMA rolagem — a chamada e as atividades enviadas —, e só no celular um seletor
 escolhe qual aparece, para a tela não virar uma rolagem infinita.
 
+**Os formulários da turma abrem no lugar, como painéis** (borda violeta, título e uma frase), e o
+botão que os abre não muda de rótulo — fechar é o "Cancelar"/"Fechar" de dentro. **O idioma da
+turma é um SELETOR das tags do produto** (`campoIdioma`): foi um campo de texto livre, e qualquer
+rótulo que não fosse exatamente o cadastrado derrubava o salvar com 500. "Adicionar aluno" fica
+aberto depois de adicionar e diz quem entrou — cadastrar uma turma é um nome depois do outro. Toda
+recusa do servidor é ESCRITA: "Enviar para N" recusado (áudio não pronto, atividade arquivada) diz o
+motivo na linha da atividade, em vez de o clique parecer não fazer nada.
+
 **A chamada é uma tabela**: aluno, e-mail em mono (ou "sem e-mail" em itálico), a pílula do estado
 no último envio e três ícones por linha — reenviar só para aquele aluno (`reenviarConvite`),
-editar nome e e-mail (`salvarAluno`, inline, sem sair da chamada) e apagar. Embaixo, "Mostrando N
+editar nome e e-mail (`salvarAluno`, inline, sem sair da chamada) e apagar — que confirma NA LINHA,
+com a consequência escrita, e não no `confirm()` do navegador. Embaixo, "Mostrando N
 de M" e a legenda dos estados, com o quadradinho da cor de cada um. **E-mail que voltou ganha uma
 faixa vermelha por aluno** acima da tabela, com "Corrigir e-mail e reenviar": abre a edição da
 linha e, salvo o cadastro, o convite sai de novo sozinho. É o único estado que pede ação, e
@@ -665,8 +762,8 @@ publicar para reenviar, os resultados para o relatório), e nada é editado no l
 título, "idioma · criada em DATA · editada há N dias", "Editar no wizard" e "Enviar para turma",
 e os quatro números — questões, tentativas em violeta, terminadas, turmas que receberam), o
 cartão de estado e áudio, "Como a turma entra" (QR, link e código NUM cartão só — são três formas
-do mesmo endereço, e separados pareciam três coisas), as questões, as habilidades e "Quem recebeu
-e quem respondeu". Havia uma segunda coluna de contexto; ela empurrava o QR para um canto e o
+do mesmo endereço, e separados pareciam três coisas), as questões e "Quem recebeu e quem
+respondeu". Havia uma segunda coluna de contexto; ela empurrava o QR para um canto e o
 professor rolava a página procurando o link.
 
 **O cartão de estado tem uma pílula e uma frase sobre o ALUNO** ("O link responde. Quem abrir
@@ -678,8 +775,9 @@ sai do ar por alguns minutos).
 
 **As questões são uma tabela**: número em mono, o que o aluno faz, uma pílula de TIPO (escuta,
 fala, escrita, escolha, montar — `tipoDoItem`, que sai do prompt e da interação juntos) e a
-habilidade derivada. Cada linha abre o editor do item. "Habilidades treinadas" são chips com a
-contagem em mono, sem cartão em volta. "Quem recebeu e quem respondeu" abre com a distribuição das
+habilidade derivada. Cada linha abre o editor do item. A contagem por habilidade cabe na linha do
+título ("3 questões · Reading 3, Writing 3"): o bloco "Habilidades treinadas" que vinha depois
+repetia a coluna da tabela e saiu. "Quem recebeu e quem respondeu" abre com a distribuição das
 respostas (barra com as três faixas e a legenda em porcentagem) e lista os envios por turma com
 abriram/terminaram e uma barra do que terminou.
 
@@ -769,30 +867,47 @@ seriam uma segunda navegação vertical ao lado da barra do Studio, disputando o
 vem da URL, não de estado de componente: é o que deixa a barra lateral apontar direto para a
 assinatura.
 
-**Seus dados** é o que aparece para os alunos nos convites — nome e e-mail, em linhas
-rótulo/campo. Senha e Encerrar conta têm cada um o seu cartão, e o de encerrar diz em texto o que
+**O topo é o da CONTA, não o de uma aba** — o mesmo `HeaderCard` das telas de turma e de atividade:
+o avatar grande (com "Montar avatar" e "Sortear outro" ao lado), o nome, o e-mail, "na entendo
+desde…" e quatro números (atividades, materiais, turmas, alunos). No celular, uma informação por
+linha. As abas vêm depois dele.
+
+**"Seus dados" são duas colunas no desktop**: o formulário à esquerda (nome e e-mail lado a lado,
+os idiomas que ensina em chips, a língua dos alunos e o "Salvar alterações" no rodapé do cartão) e,
+à direita, Senha e Encerrar conta empilhados. O e-mail é TEXTO, não campo somente-leitura — como
+campo ele parecia editável e não era. **A assinatura** é o plano em largura inteira, o uso em
+BLOCOS que dividem a linha (no trial entra o bloco dos dias que faltam) e, lado a lado, "O que
+você pode fazer" e o histórico em linha do tempo. No celular, tudo numa coluna, na mesma ordem.
+
+**O perfil tem dois dados além de nome e e-mail, os dois opcionais e os dois PADRÕES**: os idiomas
+que o professor ensina (o primeiro vira o alvo da atividade nova; com um só, a turma nova nasce
+nele; sem material ainda, a biblioteca também) e a língua dos alunos (a "língua do aluno" da
+atividade nova). Os idiomas podem ser escolhidos já no cadastro. Nada mais foi pedido de propósito:
+escola, telefone ou faixa etária não teriam uso no produto, e a política promete o mínimo.
+`Teacher.idiomas` guarda a ORDEM: salvar pela conta mantém o primeiro onde estava. Senha e Encerrar conta têm cada um o seu cartão, e o de encerrar diz em texto o que
 a tela AINDA NÃO SABE (o destino dos links publicados, Apêndice A) em vez de afirmar qualquer
 coisa.
 
 **"Seu avatar" vem ANTES de nome e e-mail**, e é a única ação desta tela que já grava de verdade
 (`gravarMeuAvatar`, em `studio.remote.ts`). A ordem não é arbitrária: o avatar é o que o ALUNO vê
 — ele aparece na turma e no convite —, e nome e e-mail são o que o professor confere. Dezoito
-números, nunca imagem (`$lib/avatar/montar.ts`); "Sortear" grava direto, "Montar o meu" abre o
-`AvatarEditor`.
+números, nunca imagem (`$lib/avatar/montar.ts`) — o que NÃO se escreve na tela; "Sortear outro"
+grava direto, "Montar avatar" abre o `AvatarEditor` — os dois moram no topo, ao lado do avatar.
 
-**Assinatura** desenha os cinco estados — ativa, trial, pagamento atrasado, confirmando,
-cancelada — com pílula, título e uma frase de contexto cada; a data de renovação vem de
-`currentPeriodEnd` e o texto se adapta quando ela não existe. "O que está liberado agora" sai de
-`can()`, a MESMA decisão que barra o botão de publicar — nunca uma cópia da regra na tela —, e os
-dois primeiros itens (links abrindo, respostas chegando) são sempre verdade por desenho de
-produto. Não há lista de faturas: sem provedor plugado, inventar uma seria mostrar cobrança que
-não aconteceu.
+**Assinatura** desenha as situações do `ResumoDoAcesso` — trial (com os dias que faltam), ativa
+(ou "encerra no fim do período"), renovação pendente (carência), pausada (trial ou plano vencido),
+cancelada e plano da escola —, cada uma com pílula, título e uma frase. O pedido de plano pendente
+aparece ANTES, num aviso com "Cancelar pedido": sem gateway, escolher um plano não libera nada sozinho.
 
-O que a tela mostra é real; as AÇÕES (salvar, trocar senha, encerrar, checkout, portal)
-continuam em mock até o Stripe existir (billing.md) — **menos duas**: o avatar, que grava, e o
-"Assinar agora" do trial, que leva a `/planos`. Escolher plano é tela nossa e não depende do
-provedor; "Gerenciar cobrança", "Ver no provedor" e "Reativar" precisam do portal dele e seguem em
-mock.
+Depois: **"Seu uso agora"** (atividades, materiais e créditos contra o limite, com a regra escrita —
+arquivar ou apagar libera vaga), **"O que você pode fazer"** (de `can()`, a mesma decisão que
+barra cada botão, numa grade de quatro; "links publicados e respostas nunca param" virou a frase
+da seção, porque eram duas linhas sempre verdes) e o
+**histórico** real (`AuditEvent`) no lugar de uma lista de faturas inventada.
+
+Ações reais: "Escolher/Trocar de plano" leva a `/planos`; "Cancelar no fim do período" e
+"Desfazer cancelamento"; "Sair da escola" para quem tem o plano da escola. Encerrar agora é decisão da
+equipe (painel interno).
 
 ## Planos e preços
 
@@ -811,12 +926,134 @@ duas cópias divergiriam no primeiro ajuste de preço. Quem tem o plano marcado 
 agora", e esse selo VENCE o "o mais escolhido": propaganda no cartão de quem já assinou aquele
 plano é propaganda para dentro.
 
-**Os PREÇOS SÃO PLACEHOLDER.** Nome de plano, valor, ciclo, o que cada um libera e a duração do
-trial não foram decididos (Apêndice A, billing.md) — tudo vive em `$lib/content/planos.ts`, com o
-aviso no cabeçalho do arquivo. Nada disso está ligado à cobrança: `can()` continua sendo o único
-ponto de decisão de acesso e não lê aquele arquivo, então trocar um valor lá muda o que a tela
-MOSTRA, nunca o que a conta PODE fazer. Os CTAs levam ao cadastro (ou ao contato, no Escola), nunca
-a um checkout que não existe.
+**Os planos são Básico, Pro, Super e Scholar**, e os NÚMEROS de cada um saem de
+`$lib/billing/catalogo.ts` — o mesmo arquivo que decide o acesso; `catalogo.test.ts` garante que o
+cartão não promete outra coisa. **Os PREÇOS continuam placeholder** em `$lib/content/planos.ts`.
+
+O CTA depende de quem lê: logado, ele chama `solicitarPlano` pela página (`onescolher`) — sem gateway,
+registra um pedido e a tela diz que a equipe vai entrar em contato; deslogado, leva ao cadastro; o
+Scholar leva sempre ao contato com `?assunto=escolas`. O componente não conhece remote function: a
+página decide o que "escolher" faz.
+
+Motivo de LIMITE (`criar`, `materiais`, `creditos`) mostra "seu plano permite N, você tem M" e o
+caminho (arquivar uma atividade, abrir a biblioteca), nunca "sua assinatura está ativa".
+
+## Módulos
+
+Os briefings são `docs/telas-modulos-professor.md` e `docs/telas-modulos-aluno.md`; as decisões, a
+atualização de `docs/adr-004-modulos-e-nivel.md`.
+
+`(studio)/modulos` (o desenho "Studio Modulos v2") responde três perguntas sem abrir nada: **o que
+precisa de mim** (um aviso no topo, o único vermelho da tela: o envio que não saiu há mais tempo, com o
+atalho para resolver e, se a mesma atividade vai para outra turma nesta semana, isso escrito), **o que
+sai esta semana** (os "Próximos 7 dias" de TODOS os módulos) e **como cada módulo anda em cada turma**.
+Cada cartão tem a pílula de estado do módulo (envio programado, que não saiu, pausado, tudo enviado,
+sem programação, sem turma — vermelho só no que não saiu), a sequência numerada (no ar em violeta,
+rascunho tracejado), os 7 dias daquele módulo e uma linha por turma: ritmo, enviadas (barra e "2 de 8"),
+próximo envio e quantos terminaram a última. Filtros com contagem e busca por módulo **ou** turma são de
+tela. Criar é um formulário curto aqui (nome e a etiqueta de cor já com a sigla); o "⋯" do cartão
+renomeia na própria linha, duplica (atividades e ordem, **nunca** turmas nem programação — duplicar não
+manda e-mail) e apaga com a consequência escrita antes. O vazio é um hero com os três passos.
+
+**Os "Próximos 7 dias" são um componente** (`SemanaDeEnvios.svelte`): um cartão por turma por dia (é
+um e-mail por aluno por data), o dia com envio largo e o vazio estreito, rascunho tracejado e com o
+aviso escrito, e cada cartão abre a programação daquela turma. No celular a faixa rola de lado. Os
+eventos saem do banco (`ModuleSend`, via `$lib/server/modulos/agenda.ts`), não de uma conta na tela:
+o que já saiu aparece no dia em que saiu, o programado no dia marcado, e **programação pausada fica
+fora** — mostrar as datas dela seria prometer o que não vai acontecer.
+
+`(studio)/modulos/calendario` (o desenho "Studio Calendario") junta todos os módulos e turmas num mês:
+cada envio na cor do MÓDULO com a sigla da TURMA; rascunho com contorno, enviado neutro, vermelho só no
+que não saiu. Clicar num dia abre o detalhe ao lado, e cada envio leva à programação da turma — o
+calendário é LEITURA, mudar uma data é na programação. Filtros de módulo (chips), turma e "mostrar
+enviados" valem para a grade e para a lista; "Mês | Lista" no desktop, e no celular só a lista (por
+CSS, sem trocar uma pela outra na hidratação). As pausadas aparecem em "Fora do calendário".
+`?modulo=` abre só com aquele módulo (o "Ver no calendário" do módulo aberto) e `?mes=AAAA-MM` noutro
+mês; valor que não é do professor é ignorado.
+
+`(studio)/modulos/[id]`, nesta ordem: cabeçalho (atividades, no ar, turmas, próximo envio; editar
+nome, cor e descrição); o aviso do envio que não saiu, com o motivo e o atalho para resolver; os
+**"Próximos 7 dias"** daquele módulo em todas as turmas, com "Ver no calendário";
+**"Atividades, na ordem"** (arrastar **e** setas, como "ordenar" do Player — é a ordem do e-mail e do
+mapa do aluno, e reordenar muda só o que ainda não saiu); **"Turmas do módulo"** (só turma alocada
+recebe envio; tirar a turma diz as três consequências antes); **"Envios"** (o que já saiu, por
+atividade e turma, com abriram/terminaram); "Ver como o aluno vê"; e apagar.
+
+**A programação abre num painel lateral** (`ProgramacaoPainel.svelte`), a partir da linha da turma
+ou de `?turma=<alocação>` (é para onde a tela da turma leva). Quatro partes, cada uma uma pergunta:
+**como chega ao aluno** (por e-mail, ou **só disponibilizar** — abre no mapa de quem tem conta e
+ninguém recebe e-mail; há escola em que e-mail de aluno é proibido, e turma que recebe tudo pelo
+grupo da sala), **quais** (um resumo "4 de 4" que abre a lista em "Escolher": os títulos já estão
+na prévia, uma vez só; desmarcar tira a atividade desta turma e do mapa destes alunos), **quando
+sai** (tudo agora, por semana, por intervalo, datas escolhidas; horário de Brasília escrito; o
+"Copiar de outra turma" mora aqui, porque copia o ritmo) e **a prévia**, a parte mais importante.
+Prévia, botões e avisos seguem o canal: "Liberar agora" e "abre no mapa, sem e-mail" no lugar de
+"Enviar agora" e "N e-mails", e nenhum aviso do teto de 100 e-mails por dia. Ela
+recalcula a cada mudança com a MESMA `agendar` do servidor: as enviadas travadas em cima, as que não
+saíram com "Tentar de novo", e cada data futura com "Adiar", "Pular", "Enviar agora", o aviso de
+rascunho e o aviso de quando o dia passa dos 100 e-mails. Adiar e pular valem ao salvar; enviar
+agora, tentar de novo e pausar são imediatos. Confirmação de envio NUNCA em verde.
+
+O menu "Módulos" leva um número vermelho com as turmas que têm envio que não saiu. A tela da turma
+tem o bloco **"Módulos desta turma"**, com a programação de cada um e "Programação" (ou "Resolver").
+
+`(studio)/modulos/[id]/mapa?turma=` é a prévia do mapa do aluno para o professor: tela fechada (sem
+barra lateral, X volta ao módulo), com a programação daquela turma e nenhum progresso de aluno.
+
+Uma atividade pode estar em vários módulos: o detalhe dela mostra os chips e "Acrescentar a um
+módulo"; a lista de atividades filtra por módulo e por nível. O histórico da turma marca "módulo X"
+nos envios que vieram de um módulo.
+
+### O mapa do aluno
+
+`aluno/modulos/[id]` (e o bloco **"Seus módulos"** em `/aluno`, entre as turmas e "Como você vem
+indo", que só aparece quando há algum). Só para quem tem conta com a ficha da turma ligada — quem
+entra pelo link aberto não tem mapa, e isso é o caminho normal. A superfície é a do Player: alvo de
+48px, cabeçalho de uma linha (voltar, marca, volume) e, no celular, a página não rola — o mapa rola
+por dentro e abre na fase atual.
+
+- **O tema 8 bits é só do mapa e do cartão dele** (`MapaDoModulo.svelte`): pixel art como dado, o
+  avatar do aluno como personagem, e a fonte pixel só em rótulo decorativo (design-system.md).
+- Cada fase tem ícone e texto de estado: concluída (violeta, nunca verde), em andamento, liberada,
+  trancada com a data em que abre, encerrada. Por baixo do desenho há uma `<ol>`.
+- Tocar abre a folha da fase; "Jogar" e "Continuar" vão pelo link pessoal do convite, para a
+  tentativa contar. **O mapa não tranca o link**: a ordem é sugestão.
+- **Estrelas só onde o professor liberou o resultado**; sem isso, "concluída · sem placar".
+- O avatar anda uma vez quando o aluno avançou e a festa do módulo concluído toca uma vez,
+  lembrados no aparelho. Nenhum ranking, nenhum dado de outro aluno.
+
+## Nível
+
+Rótulo CEFR opcional (A1–C2), escolhido em chips na etapa 1 e trocado no cabeçalho do detalhe, sem
+republicar. Aparece na lista (com filtro), na entrada do Player ao lado do idioma, no histórico do
+aluno e no seletor de atividades da turma. **Não muda os exercícios.**
+
+## Arquivar e apagar
+
+Os limites do plano são de ESTOQUE, então o detalhe da atividade termina em "Arquivar ou apagar".
+Arquivar fecha o link para quem não começou (a entrada responde `unpublished`; quem está no meio
+termina), guarda os resultados e libera a vaga; desarquivar exige vaga. Apagar de vez pede o título
+digitado e diz quantas tentativas vão junto. Arquivadas saem de "Todas" e ganham chip próprio.
+
+A etapa 1 mostra o bloqueio ANTES dos campos quando não cabe uma atividade nova — com o número, o
+caminho (arquivar) e `/planos?motivo=`. Material que não cabe aparece como "N ficaram de fora".
+
+## Escola (coordenação)
+
+`(studio)/escola` só existe para a coordenação (`requireCoordenacao`, 404 para os outros; a entrada
+na barra lateral aparece só para ela). Mostra o contrato, os professores com o uso contra o limite,
+as turmas **só em números** — a tela diz isso — e o convite, dentro dos assentos.
+
+`(studio)/escola/convite/[token]`: o aceite. Diz o que muda antes do botão (plano da escola; a
+coordenação vê números; o conteúdo continua seu) e trata cada caso — vencido, usado, sem assento,
+já em outra escola — com a sua frase. Quem não está logado passa por entrar/cadastro e volta.
+
+## Painel interno
+
+`(admin)/admin` é da equipe que opera a plataforma, com layout próprio e sóbrio. Visão geral (pedidos,
+trials vencendo, jobs falhados com "Tentar de novo"), professores (ativar plano, trial, cancelar,
+créditos de cortesia, histórico), pedidos (atender = ativar o plano) e escolas (contrato, membros com
+exceção de limite, convites). Nunca mostra dado de aluno.
 
 ## Área do aluno
 
@@ -857,7 +1094,7 @@ mostrar.
 
 Marcadas nas próprias telas, não resolvidas por conta própria:
 
-- **Trial** — duração e exigência de cartão. A linha sob o botão de cadastro está reservada.
+- **Trial** — 14 dias com os limites do básico, sem cartão (`TRIAL` em `$lib/billing/catalogo.ts`). Rever quando houver gateway.
 - **Encerrar conta** — o que acontece com os links já publicados.
 - **Retomada** — o mecanismo de identificação do aparelho. A tela cobre os dois caminhos.
 

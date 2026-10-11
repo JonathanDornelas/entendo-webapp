@@ -1,10 +1,23 @@
 import 'dotenv/config';
 import { prisma } from '../src/lib/server/db/client.ts';
-import { conviteJobSchema, ttsJobSchema } from '../src/lib/server/queue/index.ts';
+import {
+	avisoEquipeJobSchema,
+	conviteModuloJobSchema,
+	conviteEscolaJobSchema,
+	conviteJobSchema,
+	envioProgramadoJobSchema,
+	redefinirSenhaJobSchema,
+	ttsJobSchema
+} from '../src/lib/server/queue/index.ts';
 import { getEmailProvider } from '../src/lib/server/email/index.ts';
 import { montarConviteAluno } from '../src/lib/server/email/convite-aluno.ts';
+import { montarAvisoEquipe } from '../src/lib/server/email/aviso-equipe.ts';
+import { montarConviteModulo } from '../src/lib/server/email/convite-modulo.ts';
+import { montarConviteEscola } from '../src/lib/server/email/convite-escola.ts';
+import { montarRedefinirSenha } from '../src/lib/server/email/redefinir-senha.ts';
 import { getTtsProvider, ttsExpiraEm, ttsObjectKey } from '../src/lib/server/tts/index.ts';
 import { putObject } from '../src/lib/server/storage/index.ts';
+import { origemDoWorker, processarEnviosDevidos } from '../src/lib/server/modulos/programacao.ts';
 
 // Fila em tabela Postgres, sem Redis — ver .claude/rules/server.md "Fila". O
 // `SELECT ... FOR UPDATE SKIP LOCKED` é a primitiva de exclusão mútua entre
@@ -65,7 +78,7 @@ async function claimNextJob(): Promise<ClaimedJob | null> {
 
 /**
  * Sintetiza uma fala e guarda no storage. Idempotente pela chave: ela é
- * `tts/<atividade>/<hash>`, então rodar o mesmo job duas vezes reescreve o
+ * `tts/<teacherId>/<hash>`, então rodar o mesmo job duas vezes reescreve o
  * mesmo arquivo e atualiza a mesma linha.
  *
  * Job de áudio EXPIRADO é retrabalho legítimo, não duplicata: o objeto some do
@@ -110,6 +123,81 @@ async function processConvite(payload: unknown): Promise<void> {
 	await prisma.invite.update({ where: { id: job.inviteId }, data: { sentAt: new Date() } });
 }
 
+/**
+ * O convite de módulo: um e-mail com todas as atividades. Idempotente pelos
+ * `sentAt` dos convites que ele entrega — se nenhum está pendente, já saiu.
+ * Marca TODOS depois de enviar, numa escrita só.
+ */
+async function processConviteModulo(payload: unknown): Promise<void> {
+	const job = conviteModuloJobSchema.parse(payload);
+	const pendentes = await prisma.invite.count({
+		where: { id: { in: job.inviteIds }, sentAt: null }
+	});
+	if (pendentes === 0) return;
+
+	const email = montarConviteModulo(job);
+	await getEmailProvider().send({ ...email, to: job.to });
+
+	await prisma.invite.updateMany({
+		where: { id: { in: job.inviteIds }, sentAt: null },
+		data: { sentAt: new Date() }
+	});
+}
+
+/**
+ * O convite de escola. Idempotente por `sentAt`, e não manda convite que já foi
+ * aceito, revogado (apagado) ou vencido — chegaria um link que não abre.
+ */
+async function processConviteEscola(payload: unknown): Promise<void> {
+	const job = conviteEscolaJobSchema.parse(payload);
+	const convite = await prisma.schoolInvite.findUnique({ where: { id: job.inviteId } });
+	if (!convite || convite.sentAt || convite.acceptedAt || convite.expiresAt <= new Date()) return;
+
+	await getEmailProvider().send({ ...montarConviteEscola(job), to: job.to });
+	await prisma.schoolInvite.update({ where: { id: job.inviteId }, data: { sentAt: new Date() } });
+}
+
+/**
+ * O aviso para a equipe. Sem `CONTATO_PARA` ele vai para o log — o mesmo
+ * comportamento de e-mail sem provedor —, porque o pedido já está gravado no
+ * banco e o painel o mostra de qualquer jeito. Não é idempotente por marca (não
+ * há linha de envio): repetir manda de novo, e um aviso duplicado para a
+ * equipe é inofensivo.
+ */
+/**
+ * O envio programado de um módulo (docs/telas-modulos-professor.md 2.4). O job
+ * só diz QUAL alocação acordar; o que sai é decidido pelo banco na hora, então
+ * um job de uma data que mudou acorda, não acha nada devido, e termina.
+ */
+async function processEnvioProgramado(payload: unknown): Promise<void> {
+	const job = envioProgramadoJobSchema.parse(payload);
+	await processarEnviosDevidos(job.allocationId, origemDoWorker());
+}
+
+async function processAvisoEquipe(payload: unknown): Promise<void> {
+	const job = avisoEquipeJobSchema.parse(payload);
+	const para = process.env.CONTATO_PARA;
+	const email = montarAvisoEquipe(job);
+	if (!para) {
+		console.info(
+			`[aviso-equipe] CONTATO_PARA vazio — "${job.assunto}"\n${job.texto.replace(/^/gm, '  ')}`
+		);
+		return;
+	}
+	await getEmailProvider().send({ ...email, to: para, replyTo: job.replyTo });
+}
+
+/**
+ * O link de redefinir senha. Link vencido na fila não sai: chegaria dizendo
+ * "vale por 1 hora" e abriria em "link expirado". Rodar duas vezes manda o
+ * mesmo link duas vezes — inofensivo, e melhor que não mandar nenhum.
+ */
+async function processRedefinirSenha(payload: unknown): Promise<void> {
+	const job = redefinirSenhaJobSchema.parse(payload);
+	if (new Date(job.expiraEm) <= new Date()) return;
+	await getEmailProvider().send({ ...montarRedefinirSenha(job), to: job.to });
+}
+
 async function processJob(job: ClaimedJob): Promise<void> {
 	// Todo handler precisa ser idempotente: o mesmo job pode rodar mais de uma
 	// vez se o worker cair entre concluir o trabalho e marcar `done`.
@@ -118,6 +206,16 @@ async function processJob(job: ClaimedJob): Promise<void> {
 			return processTts(job.payload);
 		case 'convite':
 			return processConvite(job.payload);
+		case 'convite-escola':
+			return processConviteEscola(job.payload);
+		case 'convite-modulo':
+			return processConviteModulo(job.payload);
+		case 'aviso-equipe':
+			return processAvisoEquipe(job.payload);
+		case 'redefinir-senha':
+			return processRedefinirSenha(job.payload);
+		case 'envio-programado':
+			return processEnvioProgramado(job.payload);
 		default:
 			throw new Error(`Nenhum handler registrado para o tipo de job "${job.type}"`);
 	}

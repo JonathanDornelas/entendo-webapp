@@ -1,23 +1,41 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import Loading from '$lib/components/Loading.svelte';
 	import { authClient } from '$lib/client/auth';
+	import { authAlunoClient } from '$lib/client/auth-aluno';
 
+	// Recuperar acesso — professor OU aluno, com o mesmo seletor da tela de
+	// entrar: são duas contas por baixo (auth.md), e o pedido vai para a
+	// instância certa. `?como=aluno` pré-seleciona, como no entrar.
+	//
 	// A confirmação é NEUTRA — "se esse e-mail existir". Não vaza quem tem conta.
+	type Como = 'professor' | 'aluno';
+	let como = $state<Como>(page.url.searchParams.get('como') === 'aluno' ? 'aluno' : 'professor');
 	let email = $state('');
 	let sent = $state(false);
 	let loading = $state(false);
 	let cooldown = $state(0);
 
+	/** Para onde o link do e-mail leva: a tela de nova senha, já sabendo de que conta é. */
+	const destino = $derived(
+		resolve('/(auth)/redefinir-senha') + (como === 'aluno' ? '?como=aluno' : '')
+	);
+	const voltarParaEntrar = $derived(
+		resolve('/(auth)/entrar') + (como === 'aluno' ? '?como=aluno' : '')
+	);
+
+	// Better Auth não distingue e-mail existente de inexistente na resposta — a
+	// UI trata os dois como "enviado" de propósito, mesma regra da tela de entrar.
+	function pedir() {
+		const cliente = como === 'aluno' ? authAlunoClient : authClient;
+		return cliente.requestPasswordReset({ email: email.trim(), redirectTo: destino });
+	}
+
 	async function onSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		loading = true;
-		// Better Auth não distingue e-mail existente de inexistente na resposta —
-		// a UI trata os dois como "enviado" de propósito, mesma regra da tela de entrar.
-		await authClient.requestPasswordReset({
-			email,
-			redirectTo: resolve('/(auth)/redefinir-senha')
-		});
+		await pedir();
 		loading = false;
 		sent = true;
 		startCooldown();
@@ -33,10 +51,7 @@
 
 	async function resend() {
 		if (cooldown > 0) return;
-		await authClient.requestPasswordReset({
-			email,
-			redirectTo: resolve('/(auth)/redefinir-senha')
-		});
+		await pedir();
 		startCooldown();
 	}
 </script>
@@ -86,11 +101,31 @@
 			</div>
 		</div>
 	{:else}
+		<div
+			class="mb-6 grid grid-cols-2 gap-1 rounded-full bg-base-200 p-1"
+			role="tablist"
+			aria-label="Recuperar a conta de"
+		>
+			{#each [{ id: 'professor' as const, label: 'Professor' }, { id: 'aluno' as const, label: 'Aluno' }] as opcao (opcao.id)}
+				<button
+					type="button"
+					role="tab"
+					aria-selected={como === opcao.id}
+					onclick={() => (como = opcao.id)}
+					class="rounded-full px-4 py-2 text-[0.84rem] transition-colors
+					       {como === opcao.id
+						? 'bg-primary font-bold text-primary-content'
+						: 'font-semibold text-base-content/65 hover:text-base-content'}">{opcao.label}</button
+				>
+			{/each}
+		</div>
 		<h1 class="mb-1.5 font-display text-[22px] font-semibold tracking-[-0.02em]">
 			Recuperar acesso
 		</h1>
 		<p class="mb-[18px] text-[13.5px] leading-snug text-base-content/65">
-			Enviamos um link de redefinição para o seu e-mail.
+			{como === 'aluno'
+				? 'Digite o e-mail da sua conta de aluno. Enviamos um link para criar uma senha nova.'
+				: 'Digite o e-mail da sua conta. Enviamos um link para criar uma senha nova.'}
 		</p>
 		<form class="grid gap-3.5" onsubmit={onSubmit}>
 			<label class="block">
@@ -118,7 +153,8 @@
 			</button>
 		</form>
 		<p class="mt-4 text-center text-[13px]">
-			<a href={resolve('/(auth)/entrar')}>Voltar para entrar</a>
+			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- é a rota resolvida mais o modo (?como=aluno); a regra não enxerga a concatenação. -->
+			<a href={voltarParaEntrar}>Voltar para entrar</a>
 		</p>
 	{/if}
 </div>

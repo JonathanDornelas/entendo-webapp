@@ -3,10 +3,12 @@ import type { PageServerLoad } from './$types';
 import { contaAluno, tentativasSoltas } from '$lib/server/db/repos/student-accounts';
 import { publicationSettingsSchema } from '$lib/server/player/settings';
 import { labelForTag } from '$lib/kernel/language/profiles';
+import { nivelOuNulo } from '$lib/atividades/nivel';
 import { etiquetaDaTurma } from '$lib/server/turmas/etiqueta';
 import { rotuloDoItem } from '$lib/server/player/rotulo';
 import { gradingSchema, interactionSchema, promptSchema } from '$lib/kernel/item';
 import { duracao, haQuantoTempo, ordinal } from '$lib/tempo';
+import { mapasDoAluno } from '$lib/server/db/repos/mapa-aluno';
 
 /**
  * A área do aluno: o histórico dele, como ele vem indo, e as turmas de que faz
@@ -27,12 +29,15 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
 	const conta = contaAluno({ id: locals.aluno.id });
 
 	const anonId = cookies.get('entendo_anon');
-	const [fichas, historico, soltas] = await Promise.all([
+	const [fichas, historico, soltas, mapas] = await Promise.all([
 		conta.fichas(),
 		conta.historico(),
 		// O convite de adotar só existe quando há algo solto NESTE aparelho —
 		// sem isso ele seria um botão permanente oferecendo o que não há.
-		anonId ? tentativasSoltas(anonId) : Promise.resolve(0)
+		anonId ? tentativasSoltas(anonId) : Promise.resolve(0),
+		// Os módulos das turmas desta conta — o bloco "Seus módulos"
+		// (docs/telas-modulos-aluno.md 1). Só existe para quem tem ficha ligada.
+		mapasDoAluno({ id: locals.aluno.id }).todos()
 	]);
 
 	// Qual tentativa é cada uma, POR ATIVIDADE. `historico` vem em ordem
@@ -70,7 +75,9 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
 			slug: tentativa.publication.slug,
 			title: versao.activity.title,
 			teacher: versao.activity.teacher.name,
-			language: labelForTag(versao.activity.targetLang),
+			language:
+				labelForTag(versao.activity.targetLang) +
+				(nivelOuNulo(versao.activity.level) ? ` · ${versao.activity.level}` : ''),
 			when: haQuantoTempo(tentativa.startedAt),
 			finished: terminada,
 			answered: respondidas,
@@ -213,6 +220,7 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
 			tempoMedio: tempoMedio === null ? null : duracao(tempoMedio),
 			semanasSeguidas: seguidas
 		},
-		habilidades
+		habilidades,
+		modulos: mapas
 	};
 };

@@ -7,6 +7,7 @@
 	// Apagar aqui é como o direito de exclusão do aluno se exerce: o pedido é
 	// dele, a ação é do professor (auth.md "Dados do aluno e LGPD").
 	import { goto, invalidateAll } from '$app/navigation';
+	import Avatar from '$lib/components/Avatar.svelte';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import CorrectionIcon from '$lib/components/CorrectionIcon.svelte';
@@ -44,6 +45,7 @@
 			id: string;
 			name: string;
 			initials: string;
+			avatar: string | null;
 			when: string;
 			duration: string;
 			studentId: string | null;
@@ -64,6 +66,7 @@
 			id: page.params.attemptId ?? 'att_01',
 			name: 'João M.',
 			initials: 'JM',
+			avatar: null,
 			when: 'há 2h',
 			duration: '6min',
 			studentId: null
@@ -202,7 +205,9 @@
 <svelte:head><title>{data.attempt.name} — tentativa</title></svelte:head>
 
 <div>
-	<div class="flex flex-wrap items-center gap-3.5 border-b border-line px-[30px] py-[18px]">
+	<div
+		class="flex flex-wrap items-center gap-3.5 border-b border-line px-4 py-3.5 lg:px-7 lg:py-[18px]"
+	>
 		<a
 			href={resolve('/(studio)/resultados/[activityId]', { activityId: data.activity.id })}
 			class="flex items-center gap-2 py-2 text-[13.5px] font-semibold text-base-content/65 no-underline transition-transform hover:-translate-x-0.5"
@@ -218,11 +223,7 @@
 			</svg>
 			{data.activity.title}
 		</a>
-		<span
-			class="grid size-[38px] place-items-center rounded-full bg-base-300 text-[13px] font-bold text-primary"
-		>
-			{data.attempt.initials}
-		</span>
+		<Avatar codigo={data.attempt.avatar} nome={data.attempt.name} size={38} radius="rounded-full" />
 		<div>
 			{#if data.attempt.studentId}
 				<!-- Clicar no nome de um aluno abre o histórico dele, de qualquer
@@ -297,7 +298,7 @@
 		</button>
 	</div>
 
-	<div class="px-[30px] py-6">
+	<div class="pagina-studio">
 		<p class="mb-3.5 text-[12.5px] text-base-content/65">
 			Clique numa resposta para comentar. O comentário é seu retorno para o aluno; nas respostas de
 			escrita por rubrica a nota também sai daqui.
